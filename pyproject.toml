@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "epistemic-ci"
+version = "0.1.0"
+description = "Fail-closed meta-validation for computational research CI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{name = "Silentpartnercoding"}]
+keywords = ["research", "reproducibility", "continuous-integration", "mutation-testing"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Testing",
+]
+dependencies = []
+
+[project.scripts]
+epistemic-ci = "epistemic_ci.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Silentpartnercoding/epistemic-ci"
+Issues = "https://github.com/Silentpartnercoding/epistemic-ci/issues"
+Source = "https://github.com/Silentpartnercoding/epistemic-ci"
+
+[tool.setuptools.packages.find]
+include = ["epistemic_ci*"]
