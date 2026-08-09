@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Iterator
 import hashlib
 import json
 import os
 import re
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 from .core import ConfigurationError, load_config, run_all
-
 
 ONBOARDING_SCHEMA = "epistemic-ci.onboarding.v1"
 ANSWERS_SCHEMA = "epistemic-ci.onboarding-answers.v1"
@@ -199,7 +199,10 @@ def _discover_artifacts(root: Path, files: list[Path]) -> list[dict[str, str]]:
     return artifacts
 
 
-def discover_repository(root: Path) -> dict[str, Any]:
+def discover_repository(
+    root: Path,
+    repository_name: str | None = None,
+) -> dict[str, Any]:
     repository = root.resolve(strict=True)
     if not repository.is_dir():
         raise OnboardingError("root must be a directory")
@@ -211,7 +214,7 @@ def discover_repository(root: Path) -> dict[str, Any]:
         and path.suffix in {".yml", ".yaml"}
     )
     discovery = {
-        "repository_name": repository.name,
+        "repository_name": repository_name or repository.name,
         "workflow_files": workflows,
         "verification_command_candidates": _discover_commands(repository, files),
         "artifact_candidates": _discover_artifacts(repository, files),

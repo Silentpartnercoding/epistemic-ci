@@ -90,6 +90,23 @@ See [EPISTEMIC-CI-SETUP.md](EPISTEMIC-CI-SETUP.md) for the agent execution
 contract and [examples/onboarding-answers.json](examples/onboarding-answers.json)
 for the answers format.
 
+## Hosted GitHub Advisor
+
+The optional hosted advisor turns repository discovery into a GitHub-native
+command. An authorized maintainer comments `/epistemic-ci setup`; the app performs
+read-only discovery and opens a setup issue for human confirmation or agent
+handoff.
+
+The advisor deliberately requests **Contents read** and **Issues write** only.
+It does not request repository contents write, Pull requests, Actions,
+Administration, Secrets, Workflows, Checks, deployment, or merge authority. It
+never executes repository code. The repository owner or their existing agent
+creates the draft configuration pull request, and the repository's own GitHub
+Actions execute Epistemic CI.
+
+See [docs/GITHUB-APP.md](docs/GITHUB-APP.md) for registration, deployment,
+permissions, and the security model.
+
 ## Configuration
 
 Commands are JSON argument arrays, not shell strings. This avoids implicit shell

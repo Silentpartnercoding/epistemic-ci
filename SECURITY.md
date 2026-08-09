@@ -14,6 +14,18 @@ These controls protect the integrity of the meta-validation process. They do not
 turn repository code into trusted code and do not provide an operating-system
 sandbox. Run the tool with least-privilege credentials and normal CI isolation.
 
+## Hosted advisor
+
+The optional GitHub App verifies webhook signatures, rejects replayed delivery
+identifiers, authorizes setup commands against GitHub collaborator permission,
+and performs discovery without executing repository code. It requires Contents
+read and Issues write only. Repository snapshots are temporary; the persistent
+store contains delivery identifiers and timestamps, not repository contents.
+
+Run the bundled SQLite delivery ledger with one service replica. Multi-replica
+deployments require a shared transactional delivery store to preserve replay
+protection.
+
 ## Reporting a vulnerability
 
 Do not open a public issue for a vulnerability that could expose users or their
