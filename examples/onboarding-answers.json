@@ -1,0 +1,13 @@
+{
+  "schema": "epistemic-ci.onboarding-answers.v1",
+  "human_confirmed": true,
+  "confirmed_by": "repository owner",
+  "verification_command": ["python3", "verify.py"],
+  "trusted_outputs": ["results/result.json"],
+  "checked_population": "Every record emitted in the generated result population",
+  "required_failures": [
+    "A changed source verdict must be rejected",
+    "A corrupted generated verdict must be rejected",
+    "An altered final artifact or binding receipt must be rejected"
+  ]
+}
