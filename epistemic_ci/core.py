@@ -13,6 +13,7 @@ import tempfile
 
 
 OBSERVATION_SCHEMA = "epistemic-ci.observation.v1"
+BINDING_SCHEMA = "epistemic-ci.final-artifact-binding.v1"
 RESULT_SCHEMA = "epistemic-ci.result.v1"
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_TIMEOUT_SECONDS = 3600
@@ -505,6 +506,238 @@ def check_observation_surface(root: Path, config: dict[str, Any]) -> CheckResult
         return CheckResult(name, "fail", str(exc))
 
 
+def _artifact_manifest(root: Path, files: Sequence[Path]) -> list[dict[str, str]]:
+    workspace = root.resolve(strict=True)
+    return [
+        {
+            "path": path.resolve(strict=True).relative_to(workspace).as_posix(),
+            "sha256": f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
+        }
+        for path in files
+    ]
+
+
+def _binding_receipt(
+    root: Path,
+    receipt_path: Path,
+    files: Sequence[Path],
+) -> dict[str, Any]:
+    try:
+        value = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ConfigurationError("binding receipt must contain one UTF-8 JSON object") from exc
+    if not isinstance(value, dict):
+        raise ConfigurationError("binding receipt must contain one JSON object")
+    if value.get("schema") != BINDING_SCHEMA:
+        raise ConfigurationError(f"binding receipt schema must be {BINDING_SCHEMA}")
+    run_id = value.get("run_id")
+    if not isinstance(run_id, str) or not 1 <= len(run_id) <= 256:
+        raise ConfigurationError("binding receipt run_id must be a string of 1-256 characters")
+    artifacts = value.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ConfigurationError("binding receipt artifacts must be a non-empty array")
+
+    normalized_artifacts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict):
+            raise ConfigurationError(f"binding receipt artifacts[{index}] must be an object")
+        path = artifact.get("path")
+        if not isinstance(path, str) or not path:
+            raise ConfigurationError(
+                f"binding receipt artifacts[{index}].path must be a non-empty string"
+            )
+        if path in seen:
+            raise ConfigurationError(f"binding receipt contains duplicate artifact path: {path}")
+        seen.add(path)
+        normalized_artifacts.append(
+            {
+                "path": path,
+                "sha256": _digest(
+                    artifact.get("sha256"),
+                    f"binding receipt artifacts[{index}].sha256",
+                ),
+            }
+        )
+
+    expected = _artifact_manifest(root, files)
+    if normalized_artifacts != expected:
+        raise ConfigurationError(
+            "binding receipt must exactly match every declared final artifact in path order"
+        )
+    normalized: dict[str, Any] = {
+        "schema": BINDING_SCHEMA,
+        "run_id": run_id,
+        "artifacts": normalized_artifacts,
+    }
+    normalized["receipt_fingerprint"] = _canonical_sha256(normalized)
+    return normalized
+
+
+def _prepare_binding_workspace(
+    workspace: Path,
+    section: dict[str, Any],
+    prepare: Sequence[str],
+    timeout: int,
+) -> tuple[list[Path], Path, dict[str, Any]]:
+    prepared = run_command(prepare, workspace, timeout)
+    if prepared.returncode != 0:
+        raise ConfigurationError("final-artifact preparation failed")
+    files = _generated_files(
+        workspace,
+        section.get("artifact_paths"),
+        "final_artifact_binding.artifact_paths",
+    )
+    receipt_path = _safe_file(
+        workspace,
+        section.get("receipt_path"),
+        "final_artifact_binding.receipt_path",
+    )
+    if receipt_path.resolve(strict=True) in {path.resolve(strict=True) for path in files}:
+        raise ConfigurationError(
+            "final_artifact_binding.receipt_path must remain outside artifact_paths"
+        )
+    receipt = _binding_receipt(workspace, receipt_path, files)
+    return files, receipt_path, receipt
+
+
+def _tamper_receipt(path: Path) -> None:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    current = value["artifacts"][0]["sha256"]
+    replacement = "sha256:" + ("0" * 64)
+    if current == replacement:
+        replacement = "sha256:" + ("1" * 64)
+    value["artifacts"][0]["sha256"] = replacement
+    path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def check_final_artifact_binding(root: Path, config: dict[str, Any]) -> CheckResult:
+    name = "final-artifact-binding"
+    try:
+        section = _section(config, "final_artifact_binding")
+        prepare = _command(
+            section.get("prepare_command"),
+            "final_artifact_binding.prepare_command",
+        )
+        verify = _command(
+            section.get("verify_command"),
+            "final_artifact_binding.verify_command",
+        )
+        timeout = _timeout(
+            section.get("timeout_seconds"),
+            "final_artifact_binding.timeout_seconds",
+        )
+
+        with isolated_workspace(root, config) as workspace:
+            files, receipt_path, receipt = _prepare_binding_workspace(
+                workspace, section, prepare, timeout
+            )
+            baseline = run_command(verify, workspace, timeout)
+            receipt_after_verification = _binding_receipt(workspace, receipt_path, files)
+            if receipt_after_verification != receipt:
+                raise ConfigurationError(
+                    "binding verifier changed the final artifacts or receipt during verification"
+                )
+            manifest_fingerprint = _canonical_sha256(_artifact_manifest(workspace, files))
+            artifact_names = [
+                path.resolve(strict=True).relative_to(workspace.resolve(strict=True)).as_posix()
+                for path in files
+            ]
+        if baseline.returncode != 0:
+            return CheckResult(
+                name,
+                "fail",
+                "binding verifier rejects the freshly produced receipt and artifacts",
+                _command_details(baseline),
+            )
+
+        killed: list[str] = []
+        survivors: list[str] = []
+        invalid: list[str] = []
+        for artifact_name in artifact_names:
+            mutation_name = f"alter-artifact:{artifact_name}"
+            try:
+                with isolated_workspace(root, config) as workspace:
+                    files, _receipt_path, _receipt = _prepare_binding_workspace(
+                        workspace, section, prepare, timeout
+                    )
+                    targets = {
+                        path.resolve(strict=True)
+                        .relative_to(workspace.resolve(strict=True))
+                        .as_posix(): path
+                        for path in files
+                    }
+                    target = targets[artifact_name]
+                    target.write_bytes(target.read_bytes() + b"\nepistemic-ci:altered\n")
+                    try:
+                        _binding_receipt(workspace, _receipt_path, files)
+                    except ConfigurationError:
+                        pass
+                    else:
+                        raise ConfigurationError(
+                            "internal binding validation accepted altered artifact: "
+                            f"{artifact_name}"
+                        )
+                    result = run_command(verify, workspace, timeout)
+                if result.returncode == 0:
+                    survivors.append(mutation_name)
+                else:
+                    killed.append(mutation_name)
+            except (ConfigurationError, KeyError, OSError) as exc:
+                invalid.append(str(exc))
+
+        receipt_mutation = "tamper-receipt-digest"
+        try:
+            with isolated_workspace(root, config) as workspace:
+                files, receipt_path, _receipt = _prepare_binding_workspace(
+                    workspace, section, prepare, timeout
+                )
+                _tamper_receipt(receipt_path)
+                try:
+                    _binding_receipt(workspace, receipt_path, files)
+                except ConfigurationError:
+                    pass
+                else:
+                    raise ConfigurationError(
+                        "internal binding validation accepted a tampered receipt"
+                    )
+                result = run_command(verify, workspace, timeout)
+            if result.returncode == 0:
+                survivors.append(receipt_mutation)
+            else:
+                killed.append(receipt_mutation)
+        except (ConfigurationError, KeyError, OSError) as exc:
+            invalid.append(str(exc))
+
+        total = len(artifact_names) + 1
+        details = {
+            "artifact_count": len(artifact_names),
+            "artifacts": artifact_names,
+            "manifest_fingerprint": manifest_fingerprint,
+            "receipt_fingerprint": receipt["receipt_fingerprint"],
+            "killed": killed,
+            "survivors": survivors,
+            "invalid": invalid,
+            "total": total,
+        }
+        if survivors or invalid or len(killed) != total:
+            return CheckResult(
+                name,
+                "fail",
+                "the binding verifier must reject every altered artifact and tampered receipt",
+                details,
+            )
+        return CheckResult(
+            name,
+            "pass",
+            "the receipt exactly binds the final artifacts and the verifier "
+            "rejected every substitution",
+            details,
+        )
+    except (ConfigurationError, OSError) as exc:
+        return CheckResult(name, "fail", str(exc))
+
+
 def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
     if config.get("version") != 1:
         checks = [
@@ -519,6 +752,7 @@ def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             check_vacuous_test(root, config),
             check_executable_pass_condition(root, config),
             check_observation_surface(root, config),
+            check_final_artifact_binding(root, config),
         ]
     return {
         "schema": RESULT_SCHEMA,

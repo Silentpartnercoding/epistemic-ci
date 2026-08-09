@@ -1,5 +1,5 @@
 name: Epistemic CI
-description: Test whether a declared computational-research verification path is non-vacuous
+description: Test whether computational-research verification is non-vacuous and artifact-bound
 author: Silentpartnercoding
 
 branding:

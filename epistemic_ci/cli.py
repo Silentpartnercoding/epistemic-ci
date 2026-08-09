@@ -14,7 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Test whether a declared research-verification path is non-vacuous.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    run = subparsers.add_parser("run", help="run the three v0 meta-validation checks")
+    run = subparsers.add_parser("run", help="run the four v0 meta-validation checks")
     run.add_argument("--config", default=".epistemic-ci.json")
     run.add_argument("--root", default=".")
     run.add_argument("--output", default="epistemic-ci-result.json")
