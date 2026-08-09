@@ -1,18 +1,25 @@
-# Epistemic CI Advisor GitHub App
+# Self-Hosted Epistemic CI Advisor GitHub App
 
-The hosted advisor removes discovery friction without taking repository write
-authority. It reacts to `/epistemic-ci setup`, checks that the sender is a
-repository writer, reads a bounded set of repository metadata and text files,
-and opens a setup issue containing candidate mechanics and the human-confirmation
-questions.
+The self-hosted advisor removes discovery friction without taking repository
+write authority. The adopting organization creates and owns the GitHub App,
+credentials, container, storage, and logs. It reacts to `/epistemic-ci setup`,
+checks that the sender is a repository writer, reads a bounded set of repository
+metadata and text files, and opens a setup issue containing candidate mechanics
+and the human-confirmation questions.
 
 It does not execute repository code, create branches, open pull requests, read
 Actions secrets, change settings, or merge. Repository-owned agents and GitHub
 Actions perform those steps under the repository's existing authority.
 
+Self-hosting is the default and currently supported deployment. Repository
+material remains inside the adopter's infrastructure and does not pass through
+a Silentpartnercoding-operated service. The same container could be operated as
+an explicitly opt-in managed service in the future, but no managed service is
+currently running or required.
+
 ## GitHub App registration
 
-Create a GitHub App with:
+The adopting organization creates its own GitHub App with:
 
 - **Webhook URL:** `https://<host>/github/webhook`
 - **Webhook secret:** a new random secret stored only in GitHub and the host

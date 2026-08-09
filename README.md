@@ -90,12 +90,13 @@ See [EPISTEMIC-CI-SETUP.md](EPISTEMIC-CI-SETUP.md) for the agent execution
 contract and [examples/onboarding-answers.json](examples/onboarding-answers.json)
 for the answers format.
 
-## Hosted GitHub Advisor
+## Self-Hosted GitHub Advisor
 
-The optional hosted advisor turns repository discovery into a GitHub-native
-command. An authorized maintainer comments `/epistemic-ci setup`; the app performs
-read-only discovery and opens a setup issue for human confirmation or agent
-handoff.
+The optional self-hosted advisor turns repository discovery into a GitHub-native
+command. The adopting organization creates and owns its GitHub App, credentials,
+container, storage, and logs. An authorized maintainer comments
+`/epistemic-ci setup`; the app performs read-only discovery and opens a setup
+issue for human confirmation or agent handoff.
 
 The advisor deliberately requests **Contents read** and **Issues write** only.
 It does not request repository contents write, Pull requests, Actions,
@@ -103,6 +104,11 @@ Administration, Secrets, Workflows, Checks, deployment, or merge authority. It
 never executes repository code. The repository owner or their existing agent
 creates the draft configuration pull request, and the repository's own GitHub
 Actions execute Epistemic CI.
+
+Self-hosting is the default deployment model. Repository material is processed
+inside the adopter's infrastructure and does not pass through a
+Silentpartnercoding-operated service. The same container could support a future
+managed offering, but no managed service is currently operated or required.
 
 See [docs/GITHUB-APP.md](docs/GITHUB-APP.md) for registration, deployment,
 permissions, and the security model.
