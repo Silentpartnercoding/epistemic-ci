@@ -51,6 +51,45 @@ epistemic-ci run \
   --output epistemic-ci-result.json
 ```
 
+## Agent-assisted repository pairing
+
+An agent can perform mechanical discovery without being allowed to invent what
+the repository's evidence means:
+
+```bash
+epistemic-ci init --root . --output epistemic-ci-onboarding.json
+```
+
+The report lists candidate verification commands, workflow files, and likely
+artifacts, then asks three plain-language questions:
+
+1. Which final files or results do people actually trust?
+2. Which planted mistakes must make verification fail?
+3. What exact population or evidence produced the result?
+
+The repository owner may answer through an agent. The agent records the
+confirmed answers using `epistemic-ci.onboarding-answers.v1`, implements the
+smallest project-specific adapters, and validates the proposed configuration:
+
+```bash
+epistemic-ci init \
+  --root . \
+  --answers .epistemic-ci-answers.json \
+  --config .epistemic-ci.json \
+  --output epistemic-ci-onboarding.json \
+  --force
+```
+
+Only a report with `status: ready_for_human_review` has complete human answers
+and a candidate configuration that passes all four deterministic checks. This
+status is not self-approval: the agent opens a reviewable pull request, and the
+owner or separately controlled reviewer decides whether the declarations match
+the intended claim.
+
+See [EPISTEMIC-CI-SETUP.md](EPISTEMIC-CI-SETUP.md) for the agent execution
+contract and [examples/onboarding-answers.json](examples/onboarding-answers.json)
+for the answers format.
+
 ## Configuration
 
 Commands are JSON argument arrays, not shell strings. This avoids implicit shell
