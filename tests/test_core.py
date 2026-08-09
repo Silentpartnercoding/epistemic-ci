@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+from epistemic_ci.core import (
+    OBSERVATION_SCHEMA,
+    check_executable_pass_condition,
+    check_observation_surface,
+    check_vacuous_test,
+    load_config,
+    run_all,
+)
+
+
+PYTHON = sys.executable
+
+
+class EpistemicCITestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "repo"
+        self.root.mkdir()
+        (self.root / "fixture.txt").write_text("PASS\n", encoding="utf-8")
+        (self.root / "generate.py").write_text(
+            "from pathlib import Path\n"
+            "v=Path('fixture.txt').read_text().strip()\n"
+            "Path('results').mkdir(exist_ok=True)\n"
+            "Path('results/out.txt').write_text('generated:'+v)\n",
+            encoding="utf-8",
+        )
+        (self.root / "check.py").write_text(
+            "from pathlib import Path\nimport sys\n"
+            "p=Path('results/out.txt')\n"
+            "sys.exit(0 if p.is_file() and p.read_text()=='generated:PASS' else 1)\n",
+            encoding="utf-8",
+        )
+        (self.root / "verify.py").write_text(
+            "exec(open('generate.py').read())\nexec(open('check.py').read())\n",
+            encoding="utf-8",
+        )
+        (self.root / "observe.py").write_text(self.valid_observation_source(), encoding="utf-8")
+
+    @staticmethod
+    def valid_observation_source(count: int = 1) -> str:
+        population = hashlib.sha256(b"population").hexdigest()
+        result = hashlib.sha256(b"result").hexdigest()
+        value = {
+            "schema": OBSERVATION_SCHEMA,
+            "run_id": "test-run",
+            "population": {"count": count, "fingerprint": f"sha256:{population}"},
+            "result": {"fingerprint": f"sha256:{result}"},
+        }
+        return f"import json\nprint(json.dumps({value!r}))\n"
+
+    def config(self) -> dict:
+        return {
+            "version": 1,
+            "vacuous_test": {
+                "verify_command": [PYTHON, "verify.py"],
+                "mutations": [
+                    {
+                        "name": "flip-source",
+                        "path": "fixture.txt",
+                        "search": "PASS",
+                        "replace": "FAIL",
+                    }
+                ],
+            },
+            "executable_pass_condition": {
+                "prepare_command": [PYTHON, "generate.py"],
+                "check_command": [PYTHON, "check.py"],
+                "generated_paths": ["results/out.txt"],
+                "mutations": [
+                    {
+                        "name": "corrupt-output",
+                        "path": "results/out.txt",
+                        "search": "generated:PASS",
+                        "replace": "generated:FAIL",
+                    }
+                ],
+            },
+            "observation_surface": {"command": [PYTHON, "observe.py"]},
+        }
+
+    def test_all_checks_pass_without_modifying_source_workspace(self) -> None:
+        result = run_all(self.root, self.config())
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 3)
+        self.assertEqual((self.root / "fixture.txt").read_text(), "PASS\n")
+        self.assertFalse((self.root / "results").exists())
+
+    def test_any_surviving_source_mutation_fails_closed(self) -> None:
+        (self.root / "metadata.txt").write_text("ORIGINAL", encoding="utf-8")
+        config = self.config()
+        config["vacuous_test"]["mutations"].append(
+            {
+                "name": "survivor",
+                "path": "metadata.txt",
+                "search": "ORIGINAL",
+                "replace": "CORRUPTED",
+            }
+        )
+        check = check_vacuous_test(self.root, config)
+        self.assertEqual(check.status, "fail")
+        self.assertEqual(check.details["survivors"], ["survivor"])
+
+    def test_source_mutation_must_match_exactly_once(self) -> None:
+        (self.root / "unused.txt").write_text("TOKEN TOKEN", encoding="utf-8")
+        config = self.config()
+        config["vacuous_test"]["mutations"][0].update(
+            {"path": "unused.txt", "search": "TOKEN", "replace": "OTHER"}
+        )
+        check = check_vacuous_test(self.root, config)
+        self.assertEqual(check.status, "fail")
+        self.assertTrue(check.details["invalid"])
+
+    def test_source_mutation_cannot_escape_root(self) -> None:
+        outside = self.root.parent / "outside.txt"
+        outside.write_text("PASS", encoding="utf-8")
+        config = self.config()
+        config["vacuous_test"]["mutations"][0]["path"] = "../outside.txt"
+        check = check_vacuous_test(self.root, config)
+        self.assertEqual(check.status, "fail")
+        self.assertEqual(outside.read_text(), "PASS")
+
+    def test_source_mutation_cannot_follow_symlink_outside_root(self) -> None:
+        outside = self.root.parent / "outside.txt"
+        outside.write_text("PASS", encoding="utf-8")
+        try:
+            (self.root / "link.txt").symlink_to(outside)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        config = self.config()
+        config["vacuous_test"]["mutations"][0]["path"] = "link.txt"
+        check = check_vacuous_test(self.root, config)
+        self.assertEqual(check.status, "fail")
+        self.assertEqual(outside.read_text(), "PASS")
+
+    def test_output_change_alone_does_not_prove_dependency(self) -> None:
+        (self.root / "check.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+        check = check_executable_pass_condition(self.root, self.config())
+        self.assertEqual(check.status, "fail")
+        self.assertEqual(check.details["survivors"], ["corrupt-output"])
+
+    def test_deterministic_generated_output_is_accepted(self) -> None:
+        first = check_executable_pass_condition(self.root, self.config())
+        second = check_executable_pass_condition(self.root, self.config())
+        self.assertEqual(first.status, "pass")
+        self.assertEqual(second.status, "pass")
+        self.assertEqual(
+            first.details["generated_fingerprint"],
+            second.details["generated_fingerprint"],
+        )
+
+    def test_output_mutation_must_target_declared_generated_file(self) -> None:
+        config = self.config()
+        config["executable_pass_condition"]["mutations"][0]["path"] = "fixture.txt"
+        check = check_executable_pass_condition(self.root, config)
+        self.assertEqual(check.status, "fail")
+        self.assertTrue(check.details["invalid"])
+
+    def test_generated_paths_must_match_files(self) -> None:
+        config = self.config()
+        config["executable_pass_condition"]["generated_paths"] = ["missing.txt"]
+        check = check_executable_pass_condition(self.root, config)
+        self.assertEqual(check.status, "fail")
+
+    def test_observation_requires_json(self) -> None:
+        (self.root / "observe.py").write_text("print('banana')\n", encoding="utf-8")
+        check = check_observation_surface(self.root, self.config())
+        self.assertEqual(check.status, "fail")
+
+    def test_observation_requires_positive_population(self) -> None:
+        (self.root / "observe.py").write_text(self.valid_observation_source(0), encoding="utf-8")
+        check = check_observation_surface(self.root, self.config())
+        self.assertEqual(check.status, "fail")
+
+    def test_observation_requires_sha256_fingerprints(self) -> None:
+        config = self.config()
+        (self.root / "observe.py").write_text(
+            "import json\nprint(json.dumps({"
+            f"'schema':'{OBSERVATION_SCHEMA}','run_id':'x',"
+            "'population':{'count':1,'fingerprint':'hello'},"
+            "'result':{'fingerprint':'sha256:'+'0'*64}}))\n",
+            encoding="utf-8",
+        )
+        check = check_observation_surface(self.root, config)
+        self.assertEqual(check.status, "fail")
+
+    def test_observation_returns_binding_fingerprint(self) -> None:
+        check = check_observation_surface(self.root, self.config())
+        self.assertEqual(check.status, "pass")
+        self.assertRegex(check.details["observation_fingerprint"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_string_commands_are_rejected(self) -> None:
+        config = self.config()
+        config["vacuous_test"]["verify_command"] = f"{PYTHON} verify.py"
+        check = check_vacuous_test(self.root, config)
+        self.assertEqual(check.status, "fail")
+
+    def test_command_timeout_fails(self) -> None:
+        (self.root / "slow.py").write_text("import time\ntime.sleep(2)\n", encoding="utf-8")
+        config = self.config()
+        config["vacuous_test"]["verify_command"] = [PYTHON, "slow.py"]
+        config["vacuous_test"]["timeout_seconds"] = 1
+        check = check_vacuous_test(self.root, config)
+        self.assertEqual(check.status, "fail")
+        self.assertTrue(check.details["timed_out"])
+
+    def test_any_failed_check_fails_overall_result(self) -> None:
+        config = self.config()
+        config["observation_surface"]["command"] = [PYTHON, "missing.py"]
+        result = run_all(self.root, config)
+        self.assertEqual(result["status"], "fail")
+
+    def test_version_is_required(self) -> None:
+        config = self.config()
+        config.pop("version")
+        result = run_all(self.root, config)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["checks"][0]["name"], "configuration")
+
+    def test_invalid_json_config_is_rejected(self) -> None:
+        path = self.root / "bad.json"
+        path.write_text("{", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            load_config(path)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,528 @@
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Iterator, Sequence
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+
+
+OBSERVATION_SCHEMA = "epistemic-ci.observation.v1"
+RESULT_SCHEMA = "epistemic-ci.result.v1"
+DEFAULT_TIMEOUT_SECONDS = 120
+MAX_TIMEOUT_SECONDS = 3600
+MAX_CAPTURE_CHARS = 8_000
+DEFAULT_COPY_EXCLUDES = (
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    ".nox",
+    "dist",
+    "build",
+    "*.egg-info",
+    "epistemic-ci-result.json",
+)
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    name: str
+    status: str
+    reason: str
+    details: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    returncode: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+    error: str | None = None
+
+
+class ConfigurationError(ValueError):
+    pass
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigurationError(f"cannot load config: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigurationError("config root must be a JSON object")
+    return data
+
+
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _trim(value: str) -> str:
+    if len(value) <= MAX_CAPTURE_CHARS:
+        return value
+    return value[:MAX_CAPTURE_CHARS] + "\n...[truncated]"
+
+
+def _command(value: Any, field: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ConfigurationError(f"{field} must be a non-empty JSON array")
+    if any(not isinstance(part, str) or not part for part in value):
+        raise ConfigurationError(f"{field} entries must be non-empty strings")
+    return list(value)
+
+
+def _timeout(value: Any, field: str) -> int:
+    if value is None:
+        return DEFAULT_TIMEOUT_SECONDS
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigurationError(f"{field} must be an integer")
+    if not 1 <= value <= MAX_TIMEOUT_SECONDS:
+        raise ConfigurationError(f"{field} must be between 1 and {MAX_TIMEOUT_SECONDS}")
+    return value
+
+
+def run_command(command: Sequence[str], cwd: Path, timeout_seconds: int) -> CommandResult:
+    try:
+        completed = subprocess.run(
+            list(command),
+            cwd=str(cwd),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+    except subprocess.TimeoutExpired as exc:
+        return CommandResult(
+            returncode=None,
+            stdout=_trim(exc.stdout or ""),
+            stderr=_trim(exc.stderr or ""),
+            timed_out=True,
+            error=f"command exceeded {timeout_seconds} seconds",
+        )
+    except OSError as exc:
+        return CommandResult(None, "", "", error=str(exc))
+    return CommandResult(
+        completed.returncode,
+        _trim(completed.stdout),
+        _trim(completed.stderr),
+    )
+
+
+def _command_details(result: CommandResult) -> dict[str, Any]:
+    details: dict[str, Any] = {"returncode": result.returncode}
+    if result.timed_out:
+        details["timed_out"] = True
+    if result.error:
+        details["error"] = result.error
+    if result.stderr:
+        details["stderr"] = result.stderr
+    return details
+
+
+def _copy_excludes(config: dict[str, Any]) -> tuple[str, ...]:
+    extra = config.get("workspace_exclude", [])
+    if not isinstance(extra, list) or any(not isinstance(item, str) or not item for item in extra):
+        raise ConfigurationError("workspace_exclude must be an array of non-empty strings")
+    return DEFAULT_COPY_EXCLUDES + tuple(extra)
+
+
+@contextmanager
+def isolated_workspace(root: Path, config: dict[str, Any]) -> Iterator[Path]:
+    source = root.resolve(strict=True)
+    if not source.is_dir():
+        raise ConfigurationError("root must be a directory")
+    with tempfile.TemporaryDirectory(prefix="epistemic-ci-") as directory:
+        destination = Path(directory) / "workspace"
+        shutil.copytree(
+            source,
+            destination,
+            symlinks=True,
+            ignore=shutil.ignore_patterns(*_copy_excludes(config)),
+        )
+        yield destination
+
+
+def _inside(root: Path, candidate: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _safe_file(root: Path, relative: Any, field: str) -> Path:
+    if not isinstance(relative, str) or not relative:
+        raise ConfigurationError(f"{field} must be a non-empty relative path")
+    raw = Path(relative)
+    if raw.is_absolute():
+        raise ConfigurationError(f"{field} must stay inside the workspace")
+    workspace = root.resolve(strict=True)
+    candidate = (workspace / raw).resolve(strict=True)
+    if not _inside(workspace, candidate):
+        raise ConfigurationError(f"{field} escapes the workspace")
+    if not candidate.is_file():
+        raise ConfigurationError(f"{field} must name a regular file")
+    return candidate
+
+
+def _apply_text_mutation(root: Path, mutation: Any, field: str) -> str:
+    if not isinstance(mutation, dict):
+        raise ConfigurationError(f"{field} must be an object")
+    name = mutation.get("name")
+    if not isinstance(name, str) or not name:
+        raise ConfigurationError(f"{field}.name must be a non-empty string")
+    target = _safe_file(root, mutation.get("path"), f"{field}.path")
+    search = mutation.get("search")
+    replace = mutation.get("replace")
+    if not isinstance(search, str) or not search:
+        raise ConfigurationError(f"{field}.search must be a non-empty string")
+    if not isinstance(replace, str):
+        raise ConfigurationError(f"{field}.replace must be a string")
+    if search == replace:
+        raise ConfigurationError(f"{field} does not change the target")
+    try:
+        original = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigurationError(f"{field}.path must be UTF-8 text") from exc
+    occurrences = original.count(search)
+    if occurrences != 1:
+        raise ConfigurationError(
+            f"{field}.search must match exactly once; found {occurrences} matches"
+        )
+    target.write_text(original.replace(search, replace, 1), encoding="utf-8")
+    return name
+
+
+def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
+    value = config.get(name)
+    if not isinstance(value, dict):
+        raise ConfigurationError(f"{name} must be an object")
+    return value
+
+
+def check_vacuous_test(root: Path, config: dict[str, Any]) -> CheckResult:
+    name = "vacuous-test"
+    try:
+        section = _section(config, "vacuous_test")
+        verify = _command(section.get("verify_command"), "vacuous_test.verify_command")
+        timeout = _timeout(section.get("timeout_seconds"), "vacuous_test.timeout_seconds")
+        mutations = section.get("mutations")
+        if not isinstance(mutations, list) or not mutations:
+            raise ConfigurationError("vacuous_test.mutations must be a non-empty array")
+
+        with isolated_workspace(root, config) as workspace:
+            baseline = run_command(verify, workspace, timeout)
+        if baseline.returncode != 0:
+            return CheckResult(
+                name,
+                "fail",
+                "baseline verification does not pass in an isolated workspace",
+                _command_details(baseline),
+            )
+
+        killed: list[str] = []
+        survivors: list[str] = []
+        invalid: list[str] = []
+        for index, mutation in enumerate(mutations):
+            try:
+                with isolated_workspace(root, config) as workspace:
+                    mutation_name = _apply_text_mutation(
+                        workspace, mutation, f"vacuous_test.mutations[{index}]"
+                    )
+                    result = run_command(verify, workspace, timeout)
+                if result.returncode == 0:
+                    survivors.append(mutation_name)
+                else:
+                    killed.append(mutation_name)
+            except (ConfigurationError, OSError) as exc:
+                invalid.append(str(exc))
+
+        details = {
+            "killed": killed,
+            "survivors": survivors,
+            "invalid": invalid,
+            "total": len(mutations),
+        }
+        if survivors or invalid or len(killed) != len(mutations):
+            return CheckResult(
+                name,
+                "fail",
+                "every declared source/input mutation must make verification fail",
+                details,
+            )
+        return CheckResult(
+            name,
+            "pass",
+            "every declared source/input mutation made verification fail",
+            details,
+        )
+    except (ConfigurationError, OSError) as exc:
+        return CheckResult(name, "fail", str(exc))
+
+
+def _generated_files(root: Path, values: Any, field: str) -> list[Path]:
+    if not isinstance(values, list) or not values:
+        raise ConfigurationError(f"{field} must be a non-empty array")
+    workspace = root.resolve(strict=True)
+    found: dict[str, Path] = {}
+    for index, value in enumerate(values):
+        if not isinstance(value, str) or not value:
+            raise ConfigurationError(f"{field}[{index}] must be a non-empty relative path")
+        raw = Path(value)
+        if raw.is_absolute():
+            raise ConfigurationError(f"{field}[{index}] must stay inside the workspace")
+        candidate = (workspace / raw).resolve(strict=True)
+        if not _inside(workspace, candidate):
+            raise ConfigurationError(f"{field}[{index}] escapes the workspace")
+        if candidate.is_file():
+            candidates = [candidate]
+        elif candidate.is_dir():
+            candidates = sorted(path.resolve(strict=True) for path in candidate.rglob("*") if path.is_file())
+        else:
+            candidates = []
+        for path in candidates:
+            if not _inside(workspace, path):
+                raise ConfigurationError(f"{field}[{index}] contains a file outside the workspace")
+            found[str(path.relative_to(workspace))] = path
+    if not found:
+        raise ConfigurationError(f"{field} matched no generated files after preparation")
+    return [found[key] for key in sorted(found)]
+
+
+def _manifest_fingerprint(root: Path, files: Sequence[Path]) -> str:
+    workspace = root.resolve(strict=True)
+    digest = hashlib.sha256()
+    for path in files:
+        relative = str(path.resolve(strict=True).relative_to(workspace)).encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def check_executable_pass_condition(root: Path, config: dict[str, Any]) -> CheckResult:
+    name = "executable-pass-condition"
+    try:
+        section = _section(config, "executable_pass_condition")
+        prepare = _command(
+            section.get("prepare_command"), "executable_pass_condition.prepare_command"
+        )
+        check = _command(
+            section.get("check_command"), "executable_pass_condition.check_command"
+        )
+        timeout = _timeout(
+            section.get("timeout_seconds"), "executable_pass_condition.timeout_seconds"
+        )
+        generated_paths = section.get("generated_paths")
+        mutations = section.get("mutations")
+        if not isinstance(mutations, list) or not mutations:
+            raise ConfigurationError(
+                "executable_pass_condition.mutations must be a non-empty array"
+            )
+
+        with isolated_workspace(root, config) as workspace:
+            prepared = run_command(prepare, workspace, timeout)
+            if prepared.returncode != 0:
+                return CheckResult(
+                    name,
+                    "fail",
+                    "generated-output preparation failed",
+                    _command_details(prepared),
+                )
+            files = _generated_files(
+                workspace,
+                generated_paths,
+                "executable_pass_condition.generated_paths",
+            )
+            baseline_fingerprint = _manifest_fingerprint(workspace, files)
+            baseline = run_command(check, workspace, timeout)
+        if baseline.returncode != 0:
+            return CheckResult(
+                name,
+                "fail",
+                "pass-condition check fails against freshly generated output",
+                _command_details(baseline),
+            )
+
+        killed: list[str] = []
+        survivors: list[str] = []
+        invalid: list[str] = []
+        for index, mutation in enumerate(mutations):
+            try:
+                with isolated_workspace(root, config) as workspace:
+                    prepared = run_command(prepare, workspace, timeout)
+                    if prepared.returncode != 0:
+                        raise ConfigurationError(
+                            f"preparation failed for output mutation {index}"
+                        )
+                    files = _generated_files(
+                        workspace,
+                        generated_paths,
+                        "executable_pass_condition.generated_paths",
+                    )
+                    allowed = {path.resolve(strict=True) for path in files}
+                    target = _safe_file(
+                        workspace,
+                        mutation.get("path") if isinstance(mutation, dict) else None,
+                        f"executable_pass_condition.mutations[{index}].path",
+                    )
+                    if target.resolve(strict=True) not in allowed:
+                        raise ConfigurationError(
+                            f"executable_pass_condition.mutations[{index}].path is not a declared generated file"
+                        )
+                    mutation_name = _apply_text_mutation(
+                        workspace,
+                        mutation,
+                        f"executable_pass_condition.mutations[{index}]",
+                    )
+                    result = run_command(check, workspace, timeout)
+                if result.returncode == 0:
+                    survivors.append(mutation_name)
+                else:
+                    killed.append(mutation_name)
+            except (ConfigurationError, OSError) as exc:
+                invalid.append(str(exc))
+
+        details = {
+            "generated_file_count": len(files),
+            "generated_fingerprint": baseline_fingerprint,
+            "killed": killed,
+            "survivors": survivors,
+            "invalid": invalid,
+            "total": len(mutations),
+        }
+        if survivors or invalid or len(killed) != len(mutations):
+            return CheckResult(
+                name,
+                "fail",
+                "the declared pass condition must reject every planted generated-output defect",
+                details,
+            )
+        return CheckResult(
+            name,
+            "pass",
+            "the pass condition accepted fresh output and rejected every planted output defect",
+            details,
+        )
+    except (ConfigurationError, OSError) as exc:
+        return CheckResult(name, "fail", str(exc))
+
+
+def _digest(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigurationError(f"{field} must be a sha256 digest")
+    prefix = "sha256:"
+    if not value.startswith(prefix):
+        raise ConfigurationError(f"{field} must use the sha256:<64 lowercase hex> form")
+    hexdigest = value[len(prefix) :]
+    if len(hexdigest) != 64 or any(character not in "0123456789abcdef" for character in hexdigest):
+        raise ConfigurationError(f"{field} must use the sha256:<64 lowercase hex> form")
+    return value
+
+
+def _observation(stdout: str) -> dict[str, Any]:
+    try:
+        value = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError("observation command must emit one JSON object") from exc
+    if not isinstance(value, dict):
+        raise ConfigurationError("observation command must emit one JSON object")
+    if value.get("schema") != OBSERVATION_SCHEMA:
+        raise ConfigurationError(f"observation schema must be {OBSERVATION_SCHEMA}")
+    run_id = value.get("run_id")
+    if not isinstance(run_id, str) or not 1 <= len(run_id) <= 256:
+        raise ConfigurationError("observation.run_id must be a string of 1-256 characters")
+    population = value.get("population")
+    result = value.get("result")
+    if not isinstance(population, dict) or not isinstance(result, dict):
+        raise ConfigurationError("observation must contain population and result objects")
+    count = population.get("count")
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ConfigurationError("observation.population.count must be a positive integer")
+    normalized = {
+        "schema": OBSERVATION_SCHEMA,
+        "run_id": run_id,
+        "population": {
+            "count": count,
+            "fingerprint": _digest(
+                population.get("fingerprint"), "observation.population.fingerprint"
+            ),
+        },
+        "result": {
+            "fingerprint": _digest(
+                result.get("fingerprint"), "observation.result.fingerprint"
+            )
+        },
+    }
+    normalized["observation_fingerprint"] = _canonical_sha256(normalized)
+    return normalized
+
+
+def check_observation_surface(root: Path, config: dict[str, Any]) -> CheckResult:
+    name = "observation-surface"
+    try:
+        section = _section(config, "observation_surface")
+        command = _command(section.get("command"), "observation_surface.command")
+        timeout = _timeout(
+            section.get("timeout_seconds"), "observation_surface.timeout_seconds"
+        )
+        with isolated_workspace(root, config) as workspace:
+            result = run_command(command, workspace, timeout)
+        if result.returncode != 0:
+            return CheckResult(
+                name,
+                "fail",
+                "observation command failed",
+                _command_details(result),
+            )
+        observation = _observation(result.stdout)
+        return CheckResult(
+            name,
+            "pass",
+            "one structured observation binds the checked population and result fingerprints",
+            observation,
+        )
+    except (ConfigurationError, OSError) as exc:
+        return CheckResult(name, "fail", str(exc))
+
+
+def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
+    if config.get("version") != 1:
+        checks = [
+            CheckResult(
+                "configuration",
+                "fail",
+                "config version must be the integer 1",
+            )
+        ]
+    else:
+        checks = [
+            check_vacuous_test(root, config),
+            check_executable_pass_condition(root, config),
+            check_observation_surface(root, config),
+        ]
+    return {
+        "schema": RESULT_SCHEMA,
+        "status": "pass" if all(check.status == "pass" for check in checks) else "fail",
+        "config_fingerprint": _canonical_sha256(config),
+        "checks": [asdict(check) for check in checks],
+    }
