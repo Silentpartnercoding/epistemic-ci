@@ -26,5 +26,11 @@
   },
   "observation_surface": {
     "command": ["python3", "observe.py"]
+  },
+  "final_artifact_binding": {
+    "prepare_command": ["python3", "bind.py"],
+    "verify_command": ["python3", "verify_binding.py"],
+    "artifact_paths": ["results/result.json"],
+    "receipt_path": "results/binding.json"
   }
 }

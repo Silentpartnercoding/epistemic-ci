@@ -8,8 +8,10 @@ import tempfile
 import unittest
 
 from epistemic_ci.core import (
+    BINDING_SCHEMA,
     OBSERVATION_SCHEMA,
     check_executable_pass_condition,
+    check_final_artifact_binding,
     check_observation_surface,
     check_vacuous_test,
     load_config,
@@ -45,6 +47,28 @@ class EpistemicCITestCase(unittest.TestCase):
             encoding="utf-8",
         )
         (self.root / "observe.py").write_text(self.valid_observation_source(), encoding="utf-8")
+        (self.root / "bind.py").write_text(
+            "import hashlib,json\nfrom pathlib import Path\n"
+            "exec(open('generate.py').read())\n"
+            "p=Path('results/out.txt')\n"
+            "v={'schema':'epistemic-ci.final-artifact-binding.v1','run_id':'test-run',"
+            "'artifacts':[{'path':'results/out.txt','sha256':'sha256:'"
+            "+hashlib.sha256(p.read_bytes()).hexdigest()}]}\n"
+            "Path('results/binding.json').write_text(json.dumps(v,sort_keys=True)+'\\n')\n",
+            encoding="utf-8",
+        )
+        (self.root / "verify_binding.py").write_text(
+            "import hashlib,json,sys\nfrom pathlib import Path\n"
+            "try:\n"
+            " r=json.loads(Path('results/binding.json').read_text())\n"
+            " a=r['artifacts']\n"
+            " ok=(r['schema']=='epistemic-ci.final-artifact-binding.v1' and len(a)==1 "
+            "and a[0]['path']=='results/out.txt' and a[0]['sha256']=='sha256:'"
+            "+hashlib.sha256(Path(a[0]['path']).read_bytes()).hexdigest())\n"
+            "except Exception:\n ok=False\n"
+            "sys.exit(0 if ok else 1)\n",
+            encoding="utf-8",
+        )
 
     @staticmethod
     def valid_observation_source(count: int = 1) -> str:
@@ -86,12 +110,18 @@ class EpistemicCITestCase(unittest.TestCase):
                 ],
             },
             "observation_surface": {"command": [PYTHON, "observe.py"]},
+            "final_artifact_binding": {
+                "prepare_command": [PYTHON, "bind.py"],
+                "verify_command": [PYTHON, "verify_binding.py"],
+                "artifact_paths": ["results/out.txt"],
+                "receipt_path": "results/binding.json",
+            },
         }
 
     def test_all_checks_pass_without_modifying_source_workspace(self) -> None:
         result = run_all(self.root, self.config())
         self.assertEqual(result["status"], "pass")
-        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 3)
+        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 4)
         self.assertEqual((self.root / "fixture.txt").read_text(), "PASS\n")
         self.assertFalse((self.root / "results").exists())
 
@@ -197,6 +227,62 @@ class EpistemicCITestCase(unittest.TestCase):
         check = check_observation_surface(self.root, self.config())
         self.assertEqual(check.status, "pass")
         self.assertRegex(check.details["observation_fingerprint"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_final_artifact_binding_rejects_stale_artifact(self) -> None:
+        check = check_final_artifact_binding(self.root, self.config())
+        self.assertEqual(check.status, "pass")
+        self.assertEqual(
+            check.details["killed"],
+            ["alter-artifact:results/out.txt", "tamper-receipt-digest"],
+        )
+
+    def test_final_artifact_binding_detects_vacuous_verifier(self) -> None:
+        (self.root / "verify_binding.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+        check = check_final_artifact_binding(self.root, self.config())
+        self.assertEqual(check.status, "fail")
+        self.assertEqual(
+            check.details["survivors"],
+            ["alter-artifact:results/out.txt", "tamper-receipt-digest"],
+        )
+
+    def test_final_artifact_binding_rejects_verifier_that_rewrites_evidence(self) -> None:
+        (self.root / "verify_binding.py").write_text(
+            "import hashlib,json\nfrom pathlib import Path\n"
+            "p=Path('results/out.txt')\n"
+            "p.write_bytes(p.read_bytes()+b'rewritten')\n"
+            "r=json.loads(Path('results/binding.json').read_text())\n"
+            "r['artifacts'][0]['sha256']='sha256:'+hashlib.sha256(p.read_bytes()).hexdigest()\n"
+            "Path('results/binding.json').write_text(json.dumps(r))\n",
+            encoding="utf-8",
+        )
+        check = check_final_artifact_binding(self.root, self.config())
+        self.assertEqual(check.status, "fail")
+        self.assertIn("changed", check.reason)
+
+    def test_final_artifact_binding_requires_exact_receipt_coverage(self) -> None:
+        (self.root / "extra.txt").write_text("second artifact", encoding="utf-8")
+        config = self.config()
+        config["final_artifact_binding"]["artifact_paths"].append("extra.txt")
+        check = check_final_artifact_binding(self.root, config)
+        self.assertEqual(check.status, "fail")
+        self.assertIn("exactly match", check.reason)
+
+    def test_final_artifact_binding_forbids_self_inclusion(self) -> None:
+        config = self.config()
+        config["final_artifact_binding"]["artifact_paths"].append("results/binding.json")
+        check = check_final_artifact_binding(self.root, config)
+        self.assertEqual(check.status, "fail")
+        self.assertIn("outside artifact_paths", check.reason)
+
+    def test_final_artifact_binding_rejects_wrong_schema(self) -> None:
+        source = (self.root / "bind.py").read_text(encoding="utf-8")
+        (self.root / "bind.py").write_text(
+            source.replace(BINDING_SCHEMA, "epistemic-ci.wrong.v1"),
+            encoding="utf-8",
+        )
+        check = check_final_artifact_binding(self.root, self.config())
+        self.assertEqual(check.status, "fail")
+        self.assertIn("schema", check.reason)
 
     def test_string_commands_are_rejected(self) -> None:
         config = self.config()

@@ -6,7 +6,7 @@ evidence.
 
 In plain language: it is a test for the tests.
 
-## The three v0 checks
+## The four v0 checks
 
 1. **Vacuous Test** plants every declared source or input defect in a fresh
    workspace. Every defect must make verification fail.
@@ -16,8 +16,11 @@ In plain language: it is a test for the tests.
 3. **Observation Surface** requires one machine-readable observation that binds
    a positive population count, population fingerprint, and result fingerprint
    to one run identifier.
+4. **Final Artifact Binding** requires a detached receipt that names and hashes
+   every declared final artifact. The configured verifier must reject each
+   altered artifact and a tampered receipt.
 
-All three checks fail closed. A surviving, invalid, missing, escaped, or timed-out
+All four checks fail closed. A surviving, invalid, missing, escaped, or timed-out
 test makes the complete run fail.
 
 ## What it does not prove
@@ -82,6 +85,12 @@ expansion and quoting ambiguity.
   },
   "observation_surface": {
     "command": ["python3", "observe.py"]
+  },
+  "final_artifact_binding": {
+    "prepare_command": ["python3", "bind.py"],
+    "verify_command": ["python3", "verify_binding.py"],
+    "artifact_paths": ["results/result.json"],
+    "receipt_path": "results/binding.json"
   }
 }
 ```
@@ -116,6 +125,35 @@ The observation command must print one JSON object:
 Epistemic CI validates the structure and adds a canonical fingerprint over the
 observation. The producing command remains responsible for truthfully counting
 and fingerprinting the population it actually checked.
+
+## Final-artifact binding contract
+
+The preparation command must finalize the declared artifacts and then write one
+detached JSON receipt. The receipt must remain outside `artifact_paths`; a file
+cannot safely contain its own digest.
+
+```json
+{
+  "schema": "epistemic-ci.final-artifact-binding.v1",
+  "run_id": "run-2026-08-09",
+  "artifacts": [
+    {
+      "path": "results/result.json",
+      "sha256": "sha256:<64 lowercase hex characters>"
+    }
+  ]
+}
+```
+
+Receipt entries must exactly match every file selected by `artifact_paths`, in
+sorted repository-relative path order. Epistemic CI independently checks those
+digests, then proves the configured verifier rejects each altered artifact and
+a tampered receipt.
+
+This avoids a self-referential commit certificate. If a receipt must bind a Git
+commit, store it outside that commit (for example as a CI attestation), or bind a
+defined tree that excludes the receipt. Epistemic CI does not prescribe the
+storage system; it tests the configured artifact-consumer boundary.
 
 ## GitHub Action
 
