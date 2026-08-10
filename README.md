@@ -23,6 +23,15 @@ In plain language: it is a test for the tests.
 All four checks fail closed. A surviving, invalid, missing, escaped, or timed-out
 test makes the complete run fail.
 
+**What a passing run is bounded by.** Checks 1 and 2 plant the defects the
+configuration *declares*. A pass establishes that the verification path rejects
+those defects and nothing more: a verifier whose author declared only defects it
+happens to catch will pass. That limit cannot be closed by a stricter check —
+deciding whether a declared mutation set is representative requires knowing which
+defects matter, which is the thing under study. So every result carries an
+`assurance_bound` object stating the declared count and what the run does not
+establish, in machine-readable form, so a summary or a badge cannot drop it.
+
 ## What it does not prove
 
 Epistemic CI does **not** certify that a scientific claim is true, that a sample

@@ -5,7 +5,10 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import pathlib
 import unittest
+
+from epistemic_ci import core
 
 from epistemic_ci.core import (
     BINDING_SCHEMA,
@@ -321,3 +324,59 @@ class EpistemicCITestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AssuranceBoundTests(unittest.TestCase):
+    """ECI-01. A passing run must carry its own limit.
+
+    Each check's reason already says "every DECLARED mutation". The top-level
+    status does not, and that is the field a badge or a summary reads. A green
+    result is compatible with a verifier that only detects the defects its author
+    chose to declare -- demonstrated by a package whose verifier checks nothing
+    but that its input file is non-empty, which passes all four checks and then
+    accepts a flipped verdict.
+
+    The bound is reported, not enforced: whether a declared mutation set is
+    representative cannot be decided without knowing which defects matter, which
+    is the thing under study.
+    """
+
+    def test_a_passing_result_states_what_it_does_not_establish(self) -> None:
+        config = _demo_config()
+        bound = core._assurance_bound(config)
+        self.assertGreater(bound["declared_mutations_total"], 0)
+        self.assertIn("not declared", bound["does_not_establish"])
+        self.assertIn("representative", bound["does_not_establish"])
+
+    def test_the_bound_counts_the_mutations_actually_declared(self) -> None:
+        config = _demo_config()
+        config["vacuous_test"]["mutations"] = [
+            {"name": "a", "path": "f", "search": "x", "replace": "y"},
+            {"name": "b", "path": "f", "search": "p", "replace": "q"},
+        ]
+        bound = core._assurance_bound(config)
+        self.assertEqual(bound["declared_mutations"]["vacuous_test"], 2)
+
+    def test_the_bound_is_present_in_the_result_document(self) -> None:
+        """It must survive into the artifact, not only exist as a function."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "x.txt").write_text("hello\n", encoding="utf-8")
+            result = core.run_all(root, {"version": 1})
+            self.assertIn("assurance_bound", result)
+            self.assertIn("does_not_establish", result["assurance_bound"])
+
+
+def _demo_config() -> dict:
+    return {
+        "version": 1,
+        "vacuous_test": {
+            "verify_command": ["true"],
+            "mutations": [{"name": "m", "path": "f", "search": "a", "replace": "b"}],
+        },
+        "executable_pass_condition": {
+            "prepare_command": ["true"], "check_command": ["true"],
+            "generated_paths": ["out"],
+            "mutations": [{"name": "n", "path": "out", "search": "a", "replace": "b"}],
+        },
+    }

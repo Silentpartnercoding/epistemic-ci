@@ -758,5 +758,49 @@ def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
         "schema": RESULT_SCHEMA,
         "status": "pass" if all(check.status == "pass" for check in checks) else "fail",
         "config_fingerprint": _canonical_sha256(config),
+        "assurance_bound": _assurance_bound(config),
         "checks": [asdict(check) for check in checks],
+    }
+
+
+def _assurance_bound(config: dict[str, Any]) -> dict[str, Any]:
+    """State what a passing result does and does not establish, in the result.
+
+    Each check's own `reason` already says "every DECLARED mutation", which is
+    accurate. The top-level `status: pass` carries no such qualifier, and it is
+    the field a badge, a dashboard or a summary reads. A reader who sees only
+    `pass` has no way to learn that the guarantee is bounded by a mutation set the
+    configuration author chose.
+
+    That bound is not a defect to be fixed by a stricter check. Whether a declared
+    mutation set is representative cannot be decided without knowing which defects
+    matter, which is the thing under study. An empty set and a no-op mutation are
+    already rejected -- the former by explicit validation, the latter because an
+    unchanged workspace leaves verification passing and the check then fails. What
+    remains is a verifier whose author declared only defects it happens to catch,
+    and no amount of checking inside this tool can distinguish that from a sound
+    verifier.
+
+    So the bound is reported rather than enforced, and reported in machine-readable
+    form so that summarising the result cannot silently drop it.
+    """
+    counts: dict[str, int] = {}
+    for section in ("vacuous_test", "executable_pass_condition"):
+        value = config.get(section)
+        if isinstance(value, dict) and isinstance(value.get("mutations"), list):
+            counts[section] = len(value["mutations"])
+    total = sum(counts.values())
+    return {
+        "declared_mutations": counts,
+        "declared_mutations_total": total,
+        "establishes": (
+            f"the configured verification path rejected each of the {total} "
+            f"defect(s) declared in this configuration"
+        ),
+        "does_not_establish": (
+            "that the verification path detects any defect that was not declared. "
+            "The declared set is chosen by the configuration author and this tool "
+            "cannot determine whether it is representative of the defects that "
+            "matter."
+        ),
     }
