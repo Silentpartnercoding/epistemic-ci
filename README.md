@@ -6,7 +6,7 @@ evidence.
 
 In plain language: it is a test for the tests.
 
-## The five v0 checks
+## The seven v0 checks
 
 1. **Vacuous Test** plants every declared source or input defect in a fresh
    workspace. Every defect must make verification fail.
@@ -22,6 +22,27 @@ In plain language: it is a test for the tests.
 5. **Pinned Input Binding** corrupts the workspace copy of every declared pinned
    input. The result must not move. A runner that claims its results came from
    specific bytes, but reads the working tree, fails here.
+6. **Control Discrimination** requires every declared control to fire on at least
+   one input and *not* fire on at least one. A control that fires on everything
+   measures the population, not the checker.
+7. **Evidential Independence** requires every pair of tests cited as separate
+   evidence to be separated by at least one declared mutation. Identical fire
+   patterns mean the configuration cannot tell them apart.
+
+Checks 6 and 7 are both questions about the shape of one outcome matrix — every
+declared test run against the clean tree and each mutation. Check 6 asks whether
+a row varies at all; check 7 asks whether two rows are identical. Vacuous Test
+asks only *does a defect cause failure?*, and is blind to both: a control that
+fires on everything still fails when a defect is planted, and an implied test
+still fails when the implying one does. **That correlation is the defect, and it
+reads as health.**
+
+Check 7 does **not** decide implication, which is undecidable. It reports that no
+declared mutation separates two tests, which is a statement about the
+configuration rather than about the tests. Two genuinely independent tests can
+coincide on a small mutation set, and the result says so instead of asserting
+redundancy. The remedy is a mutation that separates them, or an admission that
+they are one piece of evidence.
 
 Check 5 has the opposite polarity to the others, and that is the point. Checks
 1, 2 and 4 establish that verification is *sensitive* to corruption. Check 5
