@@ -4,13 +4,19 @@ Motivated by a real defect, not by symmetry. Minority Prophet's
 canonical-capability-runner.py pinned two files at a commit, recorded their
 hashes in a published result, and then hashed and EXECUTED the working-tree
 copies. It agreed with the pin exactly as long as nobody edited those files.
+
+Written with unittest and no third-party imports: this project declares
+`dependencies = []` and CI runs `python -m unittest discover`. An earlier draft
+of this file used pytest and broke CI on all four supported Python versions --
+a dependency added to a deliberately dependency-free project.
 """
 
-import json
-import subprocess
-from pathlib import Path
+from __future__ import annotations
 
-import pytest
+import json
+import tempfile
+import unittest
+from pathlib import Path
 
 from epistemic_ci.core import check_pinned_input_binding, run_all
 
@@ -22,7 +28,7 @@ def write(root: Path, relative: str, text: str) -> Path:
     return path
 
 
-def make_project(tmp_path: Path, *, pinned: bool) -> Path:
+def make_project(base: Path, *, pinned: bool) -> Path:
     """A runner that either reads the pin (correct) or the workspace (the bug).
 
     The pin is modelled as a store the working copy does not overlap, which is
@@ -30,7 +36,7 @@ def make_project(tmp_path: Path, *, pinned: bool) -> Path:
     isolated workspace, so a literal `git show` pin cannot be exercised here --
     a real limitation of this check, recorded in the README.
     """
-    root = tmp_path / "project"
+    root = base / "project"
     root.mkdir()
     write(root, "source.txt", "CANONICAL\n")       # the working copy, mutated
     write(root, ".pin/source.txt", "CANONICAL\n")  # the pinned bytes, not mutated
@@ -57,63 +63,62 @@ CONFIG = {
 }
 
 
-def test_a_runner_that_reads_the_pin_passes(tmp_path):
-    root = make_project(tmp_path, pinned=True)
-    result = check_pinned_input_binding(root, CONFIG)
-    assert result.status == "pass", result.details
-    assert result.details["held"] == ["source-pinned-at-commit"]
+class PinnedInputBindingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+    def test_a_runner_that_reads_the_pin_passes(self) -> None:
+        result = check_pinned_input_binding(make_project(self.base, pinned=True), CONFIG)
+        self.assertEqual(result.status, "pass", result.details)
+        self.assertEqual(result.details["held"], ["source-pinned-at-commit"])
+
+    def test_a_runner_that_reads_the_workspace_is_caught(self) -> None:
+        """The exact defect. Every recorded digest would still match, because
+        the digest is taken of the same copy that was executed."""
+        result = check_pinned_input_binding(make_project(self.base, pinned=False), CONFIG)
+        self.assertEqual(result.status, "fail")
+        self.assertTrue(any("live, not pinned" in e for e in result.details["moved"]))
+
+    def test_declaring_a_path_as_both_live_and_pinned_is_rejected(self) -> None:
+        """THE RECONCILIATION. vacuous-test requires corruption to FAIL the run;
+        this check requires it to leave the result UNCHANGED. A path declared to
+        both is a contradiction, rejected rather than silently resolved."""
+        config = dict(CONFIG)
+        config["vacuous_test"] = {
+            "verify_command": ["true"],
+            "timeout_seconds": 60,
+            "mutations": [
+                {"name": "same-file", "path": "source.txt",
+                 "search": "CANONICAL", "replace": "X"}
+            ],
+        }
+        result = check_pinned_input_binding(make_project(self.base, pinned=True), config)
+        self.assertEqual(result.status, "fail")
+        self.assertIn("never both", result.reason)
+
+    def test_sensitivity_is_reported_unestablished_rather_than_assumed(self) -> None:
+        """Insensitivity is generic. Sensitivity depends on the pin mechanism,
+        so without a tamper_command it is reported, never assumed."""
+        result = check_pinned_input_binding(make_project(self.base, pinned=True), CONFIG)
+        self.assertEqual(result.details["sensitivity_not_established"],
+                         ["source-pinned-at-commit"])
+        self.assertEqual(result.details["sensitivity_established"], [])
+
+    def test_absent_section_does_not_break_existing_configs_but_says_so(self) -> None:
+        result = check_pinned_input_binding(make_project(self.base, pinned=True), {"version": 1})
+        self.assertEqual(result.status, "pass")
+        self.assertTrue(result.details["vacuous"])
+        self.assertIn("establishes nothing", result.reason)
+
+    def test_assurance_bound_counts_pins_separately_from_mutations(self) -> None:
+        report = run_all(make_project(self.base, pinned=True), CONFIG)
+        bound = json.loads(json.dumps(report["assurance_bound"]))
+        self.assertEqual(bound["pinned_inputs"]["declared"], 1)
+        self.assertEqual(bound["pinned_inputs"]["with_sensitivity_check"], 0)
+        self.assertNotIn("pinned_inputs_declared", bound["declared_mutations"])
 
 
-def test_a_runner_that_reads_the_workspace_is_caught(tmp_path):
-    """The exact defect. Every recorded digest would still match, because the
-    digest is taken of the same copy that was executed."""
-    root = make_project(tmp_path, pinned=False)
-    result = check_pinned_input_binding(root, CONFIG)
-    assert result.status == "fail"
-    assert any("live, not pinned" in entry for entry in result.details["moved"])
-
-
-def test_declaring_a_path_as_both_live_and_pinned_is_rejected(tmp_path):
-    """THE RECONCILIATION. vacuous-test requires corruption to FAIL the run;
-    this check requires it to leave the result UNCHANGED. A path declared to
-    both is a contradiction, and is rejected rather than silently resolved."""
-    root = make_project(tmp_path, pinned=True)
-    config = dict(CONFIG)
-    config["vacuous_test"] = {
-        "verify_command": ["true"],
-        "timeout_seconds": 60,
-        "mutations": [
-            {"name": "same-file", "path": "source.txt",
-             "search": "CANONICAL", "replace": "X"}
-        ],
-    }
-    result = check_pinned_input_binding(root, config)
-    assert result.status == "fail"
-    assert "never both" in result.reason or "never both" in str(result.details)
-
-
-def test_sensitivity_is_reported_unestablished_rather_than_assumed(tmp_path):
-    """Insensitivity is generic. Sensitivity depends on the pin mechanism, so
-    without a tamper_command it is reported as not established, never assumed."""
-    root = make_project(tmp_path, pinned=True)
-    result = check_pinned_input_binding(root, CONFIG)
-    assert result.details["sensitivity_not_established"] == ["source-pinned-at-commit"]
-    assert result.details["sensitivity_established"] == []
-
-
-def test_absent_section_does_not_break_existing_configs_but_says_so(tmp_path):
-    root = make_project(tmp_path, pinned=True)
-    result = check_pinned_input_binding(root, {"version": 1})
-    assert result.status == "pass"
-    assert result.details["vacuous"] is True
-    assert "establishes nothing" in result.reason
-
-
-def test_assurance_bound_carries_the_pin_counts(tmp_path):
-    root = make_project(tmp_path, pinned=True)
-    report = run_all(root, CONFIG)
-    bound = json.loads(json.dumps(report["assurance_bound"]))
-    assert bound["pinned_inputs"]["declared"] == 1
-    assert bound["pinned_inputs"]["with_sensitivity_check"] == 0
-    # Pins must not inflate the mutation total a reader judges a pass by.
-    assert "pinned_inputs_declared" not in bound["declared_mutations"]
+if __name__ == "__main__":
+    unittest.main()
