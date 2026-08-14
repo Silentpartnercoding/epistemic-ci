@@ -100,7 +100,7 @@ class OnboardingTestCase(unittest.TestCase):
             self.assertEqual(report["status"], "ready_for_human_review")
             self.assertEqual(report["validation"]["status"], "pass")
             self.assertEqual(report["configuration_alignment"]["status"], "pass")
-            self.assertEqual(len(report["validation"]["checks"]), 5)
+            self.assertEqual(len(report["validation"]["checks"]), 7)
 
     def test_passing_config_cannot_override_human_confirmed_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

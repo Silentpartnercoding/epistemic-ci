@@ -910,6 +910,214 @@ def check_pinned_input_binding(root: Path, config: dict[str, Any]) -> CheckResul
         return CheckResult(name, "fail", str(exc))
 
 
+def _outcome_matrix(
+    root: Path,
+    config: dict[str, Any],
+    tests: list[dict[str, Any]],
+    mutations: list[Any],
+    timeout: int,
+    field: str,
+) -> tuple[dict[str, list[bool]], list[str], list[str]]:
+    """Run every declared test against the clean tree and each mutation.
+
+    Returns {test name: [clean, mut0, mut1, ...]} where True means the test
+    FAILED (fired). Shared by checks 6 and 7 because both are questions about
+    the SHAPE of this matrix rather than about any single cell -- one asks
+    whether a row varies at all, the other whether two rows are identical.
+    """
+    names: list[str] = []
+    commands: list[Sequence[str]] = []
+    for index, test in enumerate(tests):
+        if not isinstance(test, dict):
+            raise ConfigurationError(f"{field}.tests[{index}] must be an object")
+        name = test.get("name")
+        if not isinstance(name, str) or not name:
+            raise ConfigurationError(f"{field}.tests[{index}].name must be a non-empty string")
+        names.append(name)
+        commands.append(_command(test.get("command"), f"{field}.tests[{index}].command"))
+
+    matrix: dict[str, list[bool]] = {name: [] for name in names}
+    columns = ["clean"]
+    invalid: list[str] = []
+
+    with isolated_workspace(root, config) as workspace:
+        for name, command in zip(names, commands):
+            matrix[name].append(run_command(command, workspace, timeout).returncode != 0)
+
+    for index, mutation in enumerate(mutations):
+        try:
+            with isolated_workspace(root, config) as workspace:
+                columns.append(_apply_text_mutation(workspace, mutation, f"{field}.mutations[{index}]"))
+                for name, command in zip(names, commands):
+                    matrix[name].append(run_command(command, workspace, timeout).returncode != 0)
+        except (ConfigurationError, OSError) as exc:
+            invalid.append(str(exc))
+            for name in names:
+                matrix[name].append(False)
+            columns.append(f"invalid[{index}]")
+    return matrix, columns, invalid
+
+
+def check_control_discrimination(root: Path, config: dict[str, Any]) -> CheckResult:
+    """A control that fires on every input measures the population, not the checker.
+
+    Vacuous Test asks *does a defect cause failure?*. It never asks *does the
+    ABSENCE of a defect cause anything different?*. A control declared
+    must-be-non-zero that fires on every eligible input passes Vacuous Test
+    while carrying no discriminating power at all.
+
+    The worked instance in issue #3 is the sharp kind: a registered control
+    required that side-inconsistent worlds where two sets differ must exist,
+    and it fired 44,450/44,450 exhaustively and 52,178/52,178 randomized --
+    not "most", all, and provably so, because the property is entailed by the
+    definition. Any implementation that computes the two sets at all passes it.
+    It was filed under checker power and it measured the population.
+
+    This check requires each declared test to fire on at least one input and
+    NOT fire on at least one input, across the clean tree and the declared
+    mutations. A row of all-True is a control that cannot discriminate; a row
+    of all-False is a test that never fires at all.
+    """
+    name = "control-discrimination"
+    try:
+        if "control_discrimination" not in config:
+            return CheckResult(
+                name, "pass",
+                "no controls declared; this check establishes nothing here",
+                {"declared_tests": 0, "vacuous": True},
+            )
+        section = _section(config, "control_discrimination")
+        timeout = _timeout(
+            section.get("timeout_seconds"), "control_discrimination.timeout_seconds"
+        )
+        tests = section.get("tests")
+        mutations = section.get("mutations")
+        if not isinstance(tests, list) or not tests:
+            raise ConfigurationError("control_discrimination.tests must be a non-empty array")
+        if not isinstance(mutations, list) or not mutations:
+            raise ConfigurationError("control_discrimination.mutations must be a non-empty array")
+
+        matrix, columns, invalid = _outcome_matrix(
+            root, config, tests, mutations, timeout, "control_discrimination"
+        )
+
+        always: list[str] = []
+        never: list[str] = []
+        discriminating: list[str] = []
+        for test_name, row in matrix.items():
+            if all(row):
+                always.append(test_name)
+            elif not any(row):
+                never.append(test_name)
+            else:
+                discriminating.append(test_name)
+
+        details = {
+            "columns": columns,
+            "matrix": {k: list(v) for k, v in matrix.items()},
+            "discriminating": discriminating,
+            "fires_on_everything": always,
+            "never_fires": never,
+            "invalid": invalid,
+        }
+        if always or never or invalid:
+            return CheckResult(
+                name, "fail",
+                "every declared control must fire on at least one input and not fire "
+                "on at least one; a control that fires on everything measures the "
+                "population, not the checker",
+                details,
+            )
+        return CheckResult(
+            name, "pass",
+            "every declared control both fired and did not fire across the declared inputs",
+            details,
+        )
+    except (ConfigurationError, OSError) as exc:
+        return CheckResult(name, "fail", str(exc))
+
+
+def check_evidential_independence(root: Path, config: dict[str, Any]) -> CheckResult:
+    """Two tests cited as separate evidence must not behave identically.
+
+    Where one test is a logical corollary of another, both pass Vacuous Test --
+    planting a defect makes both fail -- while only one carries independent
+    evidence. The redundant green then gets counted twice.
+
+    Implication is invisible to plant-a-defect checks precisely because the
+    implied test DOES fail when the implying one fails. That correlation is the
+    defect and it reads as health.
+
+    Deciding implication in general is undecidable, so this does not attempt it.
+    It reports the computable proxy: two declared tests whose fire pattern is
+    IDENTICAL across the clean tree and every declared mutation are not
+    distinguished by any evidence in this configuration. That is not proof of
+    implication -- two genuinely independent tests can coincide on a small
+    mutation set -- and the result says so rather than asserting redundancy.
+    The remedy is a mutation that separates them, or an admission that they are
+    one piece of evidence.
+    """
+    name = "evidential-independence"
+    try:
+        if "evidential_independence" not in config:
+            return CheckResult(
+                name, "pass",
+                "no independent-evidence claims declared; this check establishes nothing here",
+                {"declared_tests": 0, "vacuous": True},
+            )
+        section = _section(config, "evidential_independence")
+        timeout = _timeout(
+            section.get("timeout_seconds"), "evidential_independence.timeout_seconds"
+        )
+        tests = section.get("tests")
+        mutations = section.get("mutations")
+        if not isinstance(tests, list) or len(tests) < 2:
+            raise ConfigurationError(
+                "evidential_independence.tests must declare at least two tests; "
+                "independence is a relation and needs a pair"
+            )
+        if not isinstance(mutations, list) or not mutations:
+            raise ConfigurationError("evidential_independence.mutations must be a non-empty array")
+
+        matrix, columns, invalid = _outcome_matrix(
+            root, config, tests, mutations, timeout, "evidential_independence"
+        )
+
+        names = list(matrix)
+        indistinguishable: list[list[str]] = []
+        for i, left in enumerate(names):
+            for right in names[i + 1:]:
+                if matrix[left] == matrix[right]:
+                    indistinguishable.append([left, right])
+
+        details = {
+            "columns": columns,
+            "matrix": {k: list(v) for k, v in matrix.items()},
+            "indistinguishable_pairs": indistinguishable,
+            "invalid": invalid,
+            "note": (
+                "identical fire patterns do not prove one test implies the other. "
+                "They establish that no declared mutation separates them, so this "
+                "configuration provides no evidence that they are independent."
+            ),
+        }
+        if indistinguishable or invalid:
+            return CheckResult(
+                name, "fail",
+                "tests cited as separate evidence must be separated by at least one "
+                "declared mutation; identical fire patterns mean this configuration "
+                "cannot tell them apart",
+                details,
+            )
+        return CheckResult(
+            name, "pass",
+            "every pair of declared tests was separated by at least one mutation",
+            details,
+        )
+    except (ConfigurationError, OSError) as exc:
+        return CheckResult(name, "fail", str(exc))
+
+
 def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
     if config.get("version") != 1:
         checks = [
@@ -926,6 +1134,8 @@ def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             check_observation_surface(root, config),
             check_final_artifact_binding(root, config),
             check_pinned_input_binding(root, config),
+            check_control_discrimination(root, config),
+            check_evidential_independence(root, config),
         ]
     return {
         "schema": RESULT_SCHEMA,

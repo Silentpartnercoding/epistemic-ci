@@ -73,6 +73,17 @@ class EpistemicCITestCase(unittest.TestCase):
             encoding="utf-8",
         )
 
+        (self.root / "meta.txt").write_text("ORIGINAL\n", encoding="utf-8")
+        (self.root / "check_a.py").write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "sys.exit(0 if 'PASS' in Path('fixture.txt').read_text() else 1)\n",
+            encoding="utf-8",
+        )
+        (self.root / "check_b.py").write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "sys.exit(0 if 'ORIGINAL' in Path('meta.txt').read_text() else 1)\n",
+            encoding="utf-8",
+        )
         (self.root / "pinned.txt").write_text("CANONICAL\n", encoding="utf-8")
         pin_dir = self.root / ".pin"
         pin_dir.mkdir(exist_ok=True)
@@ -134,6 +145,33 @@ class EpistemicCITestCase(unittest.TestCase):
             # check 5 would ship an example of the very omission the check exists
             # to detect. `pinned.txt` is the working copy; `.pin/pinned.txt` is
             # the immutable one the runner actually reads.
+            # Exercised, not vacuous: check_a fires only on the fixture mutation
+            # and check_b only on the meta mutation, so each control both fires
+            # and does not fire, and the two are separated by a mutation.
+            "control_discrimination": {
+                "tests": [
+                    {"name": "fixture-control", "command": [PYTHON, "check_a.py"]},
+                    {"name": "meta-control", "command": [PYTHON, "check_b.py"]},
+                ],
+                "mutations": [
+                    {"name": "flip-fixture", "path": "fixture.txt",
+                     "search": "PASS", "replace": "FAIL"},
+                    {"name": "flip-meta", "path": "meta.txt",
+                     "search": "ORIGINAL", "replace": "CHANGED"},
+                ],
+            },
+            "evidential_independence": {
+                "tests": [
+                    {"name": "fixture-control", "command": [PYTHON, "check_a.py"]},
+                    {"name": "meta-control", "command": [PYTHON, "check_b.py"]},
+                ],
+                "mutations": [
+                    {"name": "flip-fixture", "path": "fixture.txt",
+                     "search": "PASS", "replace": "FAIL"},
+                    {"name": "flip-meta", "path": "meta.txt",
+                     "search": "ORIGINAL", "replace": "CHANGED"},
+                ],
+            },
             "pinned_input_binding": {
                 "run_command": [PYTHON, "run_pinned.py"],
                 "result_paths": ["results/pinned-out.txt"],
@@ -151,7 +189,7 @@ class EpistemicCITestCase(unittest.TestCase):
     def test_all_checks_pass_without_modifying_source_workspace(self) -> None:
         result = run_all(self.root, self.config())
         self.assertEqual(result["status"], "pass")
-        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 5)
+        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 7)
         self.assertEqual((self.root / "fixture.txt").read_text(), "PASS\n")
         self.assertFalse((self.root / "results").exists())
 
