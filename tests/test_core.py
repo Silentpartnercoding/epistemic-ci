@@ -74,6 +74,8 @@ class EpistemicCITestCase(unittest.TestCase):
         )
 
         (self.root / "meta.txt").write_text("ORIGINAL\n", encoding="utf-8")
+        (self.root / "count_pass.py").write_text("print(3)\n", encoding="utf-8")
+        (self.root / "count_fail.py").write_text("print(2)\n", encoding="utf-8")
         (self.root / "check_a.py").write_text(
             "import sys\nfrom pathlib import Path\n"
             "sys.exit(0 if 'PASS' in Path('fixture.txt').read_text() else 1)\n",
@@ -148,6 +150,17 @@ class EpistemicCITestCase(unittest.TestCase):
             # Exercised, not vacuous: check_a fires only on the fixture mutation
             # and check_b only on the meta mutation, so each control both fires
             # and does not fire, and the two are separated by a mutation.
+            # Exercised, not vacuous: the endpoint depends on a pass/fail
+            # distinction, and the population holds instances of both. A corpus
+            # with 3 passes and 0 fails would be positive and still unable to
+            # move the endpoint -- which is the shape this check exists for.
+            "effect_reachability": {
+                "endpoint": "demo_discrimination_rate",
+                "strata": [
+                    {"name": "passing", "count_command": [PYTHON, "count_pass.py"]},
+                    {"name": "failing", "count_command": [PYTHON, "count_fail.py"]},
+                ],
+            },
             "control_discrimination": {
                 "tests": [
                     {"name": "fixture-control", "command": [PYTHON, "check_a.py"]},
@@ -189,7 +202,7 @@ class EpistemicCITestCase(unittest.TestCase):
     def test_all_checks_pass_without_modifying_source_workspace(self) -> None:
         result = run_all(self.root, self.config())
         self.assertEqual(result["status"], "pass")
-        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 7)
+        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 8)
         self.assertEqual((self.root / "fixture.txt").read_text(), "PASS\n")
         self.assertFalse((self.root / "results").exists())
 
