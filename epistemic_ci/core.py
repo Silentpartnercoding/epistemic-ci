@@ -1118,6 +1118,124 @@ def check_evidential_independence(root: Path, config: dict[str, Any]) -> CheckRe
         return CheckResult(name, "fail", str(exc))
 
 
+def check_effect_reachability(root: Path, config: dict[str, Any]) -> CheckResult:
+    """The population must contain instances of the phenomenon the endpoint is about.
+
+    All other checks interrogate the verification path. This one interrogates
+    the POPULATION, and it is the only failure here that no amount of checking
+    the checker can find: planting a defect does make verification fail, and the
+    verifier is sound. The defect is that the corpus has no instances of the
+    thing the endpoint measures, so the endpoint cannot move whatever the
+    mechanism does.
+
+    Issue #2's instance: 60 repositories, 71 planted defects, digest-manifested,
+    bound to a run id, all checks green. The mechanism under test refuses a
+    "clean" verdict when a search is INCOMPLETE. The corpus generator wrote only
+    readable files:
+
+        searched 208 · not_searched 0 · unavailable 0
+
+    Incomplete coverage never occurred. The mechanism's only lever was never
+    pulled, both arms produced identical results, and the registration was
+    authored, authorised, pinned and run before anyone noticed the population
+    was structurally incapable of answering the question.
+
+    STRATA, NOT A SINGLE COUNT. The issue proposes a population predicate that
+    must return more than zero. That catches the empty case but not the worked
+    instance's real shape, which is a population where the condition is present
+    in only ONE of its states -- 208 searched and 0 not-searched is a positive
+    count and still cannot move the endpoint. So each declared stratum is
+    required to be non-empty: if the result depends on a distinction, the corpus
+    must contain instances on both sides of it.
+
+    BOUNDED BY DECLARATION, like checks 1 and 2. The strata are the ones the
+    configuration names. A population whose author declared only the strata it
+    happens to contain will pass. That limit cannot be closed from inside this
+    tool, because deciding which distinctions matter requires knowing what the
+    claim is about -- which is the thing under study. It is reported instead.
+    """
+    name = "effect-reachability"
+    try:
+        if "effect_reachability" not in config:
+            return CheckResult(
+                name, "pass",
+                "no endpoint strata declared; this check establishes nothing here",
+                {"declared_strata": 0, "vacuous": True},
+            )
+        section = _section(config, "effect_reachability")
+        endpoint = section.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint:
+            raise ConfigurationError("effect_reachability.endpoint must be a non-empty string")
+        timeout = _timeout(
+            section.get("timeout_seconds"), "effect_reachability.timeout_seconds"
+        )
+        strata = section.get("strata")
+        if not isinstance(strata, list) or not strata:
+            raise ConfigurationError(
+                "effect_reachability.strata must be a non-empty array. If the endpoint "
+                "depends on a distinction, name each side of it: a population with "
+                "instances on only one side cannot move the endpoint."
+            )
+
+        counts: dict[str, int] = {}
+        empty: list[str] = []
+        invalid: list[str] = []
+        with isolated_workspace(root, config) as workspace:
+            for index, stratum in enumerate(strata):
+                field = f"effect_reachability.strata[{index}]"
+                if not isinstance(stratum, dict):
+                    invalid.append(f"{field} must be an object")
+                    continue
+                label = stratum.get("name")
+                if not isinstance(label, str) or not label:
+                    invalid.append(f"{field}.name must be a non-empty string")
+                    continue
+                command = _command(stratum.get("count_command"), f"{field}.count_command")
+                minimum = stratum.get("minimum_instances", 1)
+                if not isinstance(minimum, int) or minimum < 1:
+                    invalid.append(f"{field}.minimum_instances must be an integer >= 1")
+                    continue
+                result = run_command(command, workspace, timeout)
+                if result.returncode != 0:
+                    invalid.append(f"{field}.count_command failed to run")
+                    continue
+                text = (result.stdout or "").strip().splitlines()
+                try:
+                    value = int(text[-1].strip()) if text else -1
+                except ValueError:
+                    invalid.append(f"{field}.count_command must print an integer count")
+                    continue
+                counts[label] = value
+                if value < minimum:
+                    empty.append(f"{label}={value} (needs >= {minimum})")
+
+        details = {
+            "endpoint": endpoint,
+            "counts": counts,
+            "understocked_strata": empty,
+            "invalid": invalid,
+            "bounded_by": (
+                "the strata this configuration names. A population whose author "
+                "declared only the strata it happens to contain will pass."
+            ),
+        }
+        if empty or invalid:
+            return CheckResult(
+                name, "fail",
+                f"the population cannot exhibit the effect {endpoint!r} measures: "
+                "every declared stratum must contain instances, or the endpoint "
+                "cannot move whatever the mechanism does",
+                details,
+            )
+        return CheckResult(
+            name, "pass",
+            f"the population contains instances in every stratum {endpoint!r} depends on",
+            details,
+        )
+    except (ConfigurationError, OSError) as exc:
+        return CheckResult(name, "fail", str(exc))
+
+
 def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
     if config.get("version") != 1:
         checks = [
@@ -1136,6 +1254,7 @@ def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             check_pinned_input_binding(root, config),
             check_control_discrimination(root, config),
             check_evidential_independence(root, config),
+            check_effect_reachability(root, config),
         ]
     return {
         "schema": RESULT_SCHEMA,

@@ -6,7 +6,7 @@ evidence.
 
 In plain language: it is a test for the tests.
 
-## The seven v0 checks
+## The eight v0 checks
 
 1. **Vacuous Test** plants every declared source or input defect in a fresh
    workspace. Every defect must make verification fail.
@@ -36,6 +36,17 @@ asks only *does a defect cause failure?*, and is blind to both: a control that
 fires on everything still fails when a defect is planted, and an implied test
 still fails when the implying one does. **That correlation is the defect, and it
 reads as health.**
+
+8. **Effect Reachability** requires every stratum the endpoint depends on to
+   contain instances. A population with 208 searched and 0 not-searched is
+   positive, fingerprinted, and structurally unable to move the endpoint.
+
+Check 8 is the only one that interrogates the **population** rather than the
+verification path, and it is the only failure no amount of checking the checker
+can find: planting a defect *does* make verification fail, and the verifier is
+sound. The corpus simply contains no instances of the phenomenon the endpoint
+measures. It uses **strata rather than one count**, because a single positive
+count passes the case it exists to catch — 208 is greater than zero.
 
 Check 7 does **not** decide implication, which is undecidable. It reports that no
 declared mutation separates two tests, which is a statement about the
