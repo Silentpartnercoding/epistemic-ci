@@ -73,6 +73,17 @@ class EpistemicCITestCase(unittest.TestCase):
             encoding="utf-8",
         )
 
+        (self.root / "pinned.txt").write_text("CANONICAL\n", encoding="utf-8")
+        pin_dir = self.root / ".pin"
+        pin_dir.mkdir(exist_ok=True)
+        (pin_dir / "pinned.txt").write_text("CANONICAL\n", encoding="utf-8")
+        (self.root / "run_pinned.py").write_text(
+            "from pathlib import Path\n"
+            "Path('results').mkdir(exist_ok=True)\n"
+            "Path('results/pinned-out.txt').write_text(Path('.pin/pinned.txt').read_text())\n",
+            encoding="utf-8",
+        )
+
     @staticmethod
     def valid_observation_source(count: int = 1) -> str:
         population = hashlib.sha256(b"population").hexdigest()
@@ -119,12 +130,28 @@ class EpistemicCITestCase(unittest.TestCase):
                 "artifact_paths": ["results/out.txt"],
                 "receipt_path": "results/binding.json",
             },
+            # Exercised, not left vacuous. A reference configuration that skipped
+            # check 5 would ship an example of the very omission the check exists
+            # to detect. `pinned.txt` is the working copy; `.pin/pinned.txt` is
+            # the immutable one the runner actually reads.
+            "pinned_input_binding": {
+                "run_command": [PYTHON, "run_pinned.py"],
+                "result_paths": ["results/pinned-out.txt"],
+                "pins": [
+                    {
+                        "name": "reads-the-pin-not-the-workspace",
+                        "path": "pinned.txt",
+                        "search": "CANONICAL",
+                        "replace": "TAMPERED",
+                    }
+                ],
+            },
         }
 
     def test_all_checks_pass_without_modifying_source_workspace(self) -> None:
         result = run_all(self.root, self.config())
         self.assertEqual(result["status"], "pass")
-        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 4)
+        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 5)
         self.assertEqual((self.root / "fixture.txt").read_text(), "PASS\n")
         self.assertFalse((self.root / "results").exists())
 

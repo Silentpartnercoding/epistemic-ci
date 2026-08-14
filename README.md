@@ -6,7 +6,7 @@ evidence.
 
 In plain language: it is a test for the tests.
 
-## The four v0 checks
+## The five v0 checks
 
 1. **Vacuous Test** plants every declared source or input defect in a fresh
    workspace. Every defect must make verification fail.
@@ -19,6 +19,40 @@ In plain language: it is a test for the tests.
 4. **Final Artifact Binding** requires a detached receipt that names and hashes
    every declared final artifact. The configured verifier must reject each
    altered artifact and a tampered receipt.
+5. **Pinned Input Binding** corrupts the workspace copy of every declared pinned
+   input. The result must not move. A runner that claims its results came from
+   specific bytes, but reads the working tree, fails here.
+
+Check 5 has the opposite polarity to the others, and that is the point. Checks
+1, 2 and 4 establish that verification is *sensitive* to corruption. Check 5
+establishes that it is *insensitive* where it claims to be pinned — because
+sensitivity in the wrong place is itself a defect, and a silent one: every
+recorded digest still matches, since the digest is taken of the same working-tree
+copy that was executed.
+
+The two are reconciled by partitioning inputs rather than ranking the checks:
+
+| kind | read from | corrupt the workspace copy |
+|---|---|---|
+| live | the workspace, at run time | verification must **fail** (check 1) |
+| pinned | an immutable reference | the result must **not move** (check 5) |
+
+An input cannot be both. A path declared as a `vacuous_test` mutation target
+*and* as a pin is a contradiction in the configuration and is rejected, because
+either answer would be wrong for one of the two checks.
+
+**What check 5 does and does not establish.** Insensitivity is checked
+generically and always. *Sensitivity* — that corrupting what the pin resolves to
+makes the run fail — depends on the pin mechanism, which this tool cannot know: a
+pin may be a commit, a digest, an archive or a registry reference. Where the
+configuration supplies `tamper_command`, sensitivity is checked. Where it does
+not, it is reported as **not established** for that pin rather than assumed, and
+the count is carried in the assurance bound. Pins are counted separately from
+mutations, so they cannot inflate the number a reader judges a pass by.
+
+One known limitation: `.git` is excluded from the isolated workspace, so a pin
+resolved by `git show` inside the workspace cannot be exercised by this check.
+Pins that resolve outside the workspace, or via a `tamper_command`, can.
 
 All four checks fail closed. A surviving, invalid, missing, escaped, or timed-out
 test makes the complete run fail.

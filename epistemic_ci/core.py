@@ -738,6 +738,178 @@ def check_final_artifact_binding(root: Path, config: dict[str, Any]) -> CheckRes
         return CheckResult(name, "fail", str(exc))
 
 
+def _declared_mutation_paths(config: dict[str, Any], section_name: str) -> set[str]:
+    section = config.get(section_name)
+    if not isinstance(section, dict):
+        return set()
+    mutations = section.get("mutations")
+    if not isinstance(mutations, list):
+        return set()
+    paths: set[str] = set()
+    for mutation in mutations:
+        if isinstance(mutation, dict) and isinstance(mutation.get("path"), str):
+            paths.add(Path(mutation["path"]).as_posix())
+    return paths
+
+
+def check_pinned_input_binding(root: Path, config: dict[str, Any]) -> CheckResult:
+    """A declared-pinned input must be read from its pin, not from the workspace.
+
+    THE OTHER FOUR CHECKS ALL HAVE ONE POLARITY: mutate something, verification
+    must fail. They establish that checking is SENSITIVE to corruption. This one
+    is the other half, and it exists because sensitivity in the wrong place is
+    itself a defect.
+
+    A runner that pins an input claims its results came from specific bytes. If
+    it actually reads the working-tree copy, that claim is true only while nobody
+    edits the file -- true by coincidence rather than construction. The failure
+    is silent: every recorded digest still matches, because the digest is taken
+    of the same working-tree copy that was executed.
+
+    HOW THIS RECONCILES WITH vacuous-test RATHER THAN CONTRADICTING IT. The two
+    checks partition the inputs:
+
+        live   read from the workspace at run time.  vacuous-test is correct:
+               corrupt it and verification must fail.
+        pinned read from an immutable reference.     this check is correct:
+               corrupt the workspace copy and the RESULT MUST NOT MOVE, because
+               the run never reads it.
+
+    An input cannot be both. A path declared as a vacuous-test mutation target
+    AND as a pin is a contradiction in the configuration, and is rejected rather
+    than resolved -- because either answer would be wrong for one of the two
+    checks, and guessing which is the thing this tool exists to stop.
+
+    WHAT A PASS ESTABLISHES, AND WHAT IT DOES NOT. Insensitivity is checked
+    generically and always. Sensitivity -- that corrupting what the pin RESOLVES
+    TO makes the run fail -- depends on the pin mechanism, which this tool cannot
+    know. A pin may be a commit, a digest, an archive or a registry reference.
+    Where the configuration supplies `tamper_command`, sensitivity is checked and
+    must fail the run. Where it does not, sensitivity is reported as NOT
+    ESTABLISHED for that pin rather than assumed, and the count is carried into
+    the assurance bound.
+    """
+    name = "pinned-input-binding"
+    try:
+        if "pinned_input_binding" not in config:
+            # Not every project pins an input, and a missing section must not
+            # break the four checks that predate this one. But "pass" with
+            # nothing checked is the vacuous result this tool exists to prevent,
+            # so it is stated in the reason and counted in the assurance bound,
+            # where a summariser cannot drop it silently.
+            return CheckResult(
+                name,
+                "pass",
+                "no pinned inputs declared; this check establishes nothing here",
+                {"declared_pins": 0, "vacuous": True},
+            )
+        section = _section(config, "pinned_input_binding")
+        run = _command(section.get("run_command"), "pinned_input_binding.run_command")
+        timeout = _timeout(
+            section.get("timeout_seconds"), "pinned_input_binding.timeout_seconds"
+        )
+        result_paths = section.get("result_paths")
+        pins = section.get("pins")
+        if not isinstance(pins, list) or not pins:
+            raise ConfigurationError("pinned_input_binding.pins must be a non-empty array")
+
+        declared_live = _declared_mutation_paths(config, "vacuous_test")
+        for index, pin in enumerate(pins):
+            if not isinstance(pin, dict) or not isinstance(pin.get("path"), str):
+                raise ConfigurationError(
+                    f"pinned_input_binding.pins[{index}].path must be a non-empty relative path"
+                )
+            posix = Path(pin["path"]).as_posix()
+            if posix in declared_live:
+                raise ConfigurationError(
+                    f"pinned_input_binding.pins[{index}].path {posix!r} is also a "
+                    "vacuous_test mutation target. An input is read either from the "
+                    "workspace or from a pin, never both, and the two checks require "
+                    "opposite behaviour of it."
+                )
+
+        with isolated_workspace(root, config) as workspace:
+            baseline = run_command(run, workspace, timeout)
+            if baseline.returncode != 0:
+                return CheckResult(
+                    name,
+                    "fail",
+                    "baseline run does not succeed in an isolated workspace",
+                    _command_details(baseline),
+                )
+            files = _generated_files(workspace, result_paths, "pinned_input_binding.result_paths")
+            baseline_fingerprint = _manifest_fingerprint(workspace, files)
+
+        held: list[str] = []
+        moved: list[str] = []
+        invalid: list[str] = []
+        sensitivity_established: list[str] = []
+        sensitivity_unestablished: list[str] = []
+
+        for index, pin in enumerate(pins):
+            field = f"pinned_input_binding.pins[{index}]"
+            try:
+                with isolated_workspace(root, config) as workspace:
+                    pin_name = _apply_text_mutation(workspace, pin, field)
+                    result = run_command(run, workspace, timeout)
+                    if result.returncode != 0:
+                        moved.append(f"{pin_name}: run failed after workspace edit")
+                        continue
+                    files = _generated_files(
+                        workspace, result_paths, "pinned_input_binding.result_paths"
+                    )
+                    if _manifest_fingerprint(workspace, files) != baseline_fingerprint:
+                        moved.append(f"{pin_name}: result changed, so the input is live, not pinned")
+                        continue
+                    held.append(pin_name)
+
+                tamper = pin.get("tamper_command")
+                if tamper is None:
+                    sensitivity_unestablished.append(pin_name)
+                    continue
+                tamper_command = _command(tamper, f"{field}.tamper_command")
+                with isolated_workspace(root, config) as workspace:
+                    tampered = run_command(tamper_command, workspace, timeout)
+                    if tampered.returncode != 0:
+                        invalid.append(f"{field}.tamper_command failed to run")
+                        continue
+                    after = run_command(run, workspace, timeout)
+                    if after.returncode == 0:
+                        moved.append(
+                            f"{pin_name}: run still succeeded after the pin was repointed"
+                        )
+                    else:
+                        sensitivity_established.append(pin_name)
+            except (ConfigurationError, OSError) as exc:
+                invalid.append(str(exc))
+
+        details = {
+            "held": held,
+            "moved": moved,
+            "invalid": invalid,
+            "sensitivity_established": sensitivity_established,
+            "sensitivity_not_established": sensitivity_unestablished,
+            "total": len(pins),
+            "baseline_fingerprint": baseline_fingerprint,
+        }
+        if moved or invalid or len(held) != len(pins):
+            return CheckResult(
+                name,
+                "fail",
+                "every declared pinned input must leave the result unchanged when its "
+                "workspace copy is corrupted",
+                details,
+            )
+        return CheckResult(
+            name,
+            "pass",
+            "every declared pinned input was read from its pin, not from the workspace",
+            details,
+        )
+    except (ConfigurationError, OSError) as exc:
+        return CheckResult(name, "fail", str(exc))
+
+
 def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
     if config.get("version") != 1:
         checks = [
@@ -753,6 +925,7 @@ def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             check_executable_pass_condition(root, config),
             check_observation_surface(root, config),
             check_final_artifact_binding(root, config),
+            check_pinned_input_binding(root, config),
         ]
     return {
         "schema": RESULT_SCHEMA,
@@ -790,9 +963,25 @@ def _assurance_bound(config: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, dict) and isinstance(value.get("mutations"), list):
             counts[section] = len(value["mutations"])
     total = sum(counts.values())
+    # Pins are NOT mutations and are counted separately. Folding them into the
+    # mutation total would inflate the number a reader uses to judge how much a
+    # pass established, in a tool whose whole purpose is to stop exactly that.
+    pinned_section = config.get("pinned_input_binding")
+    pins = (
+        [pin for pin in pinned_section["pins"] if isinstance(pin, dict)]
+        if isinstance(pinned_section, dict) and isinstance(pinned_section.get("pins"), list)
+        else []
+    )
+    pinned_inputs = {
+        "declared": len(pins),
+        "with_sensitivity_check": sum(
+            1 for pin in pins if pin.get("tamper_command") is not None
+        ),
+    }
     return {
         "declared_mutations": counts,
         "declared_mutations_total": total,
+        "pinned_inputs": pinned_inputs,
         "establishes": (
             f"the configured verification path rejected each of the {total} "
             f"defect(s) declared in this configuration"
