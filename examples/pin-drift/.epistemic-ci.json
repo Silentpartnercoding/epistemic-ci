@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "vacuous_test": {
+    "verify_command": [
+      "python3",
+      "verify.py"
+    ],
+    "mutations": [
+      {
+        "name": "corrupt-live-input",
+        "path": "live_input.txt",
+        "search": "sample",
+        "replace": "xxxxxx"
+      }
+    ]
+  },
+  "pinned_input_binding": {
+    "run_command": [
+      "python3",
+      "run.py"
+    ],
+    "result_paths": [
+      "results/result.json"
+    ],
+    "pins": [
+      {
+        "path": "pinned/threshold.txt"
+      }
+    ]
+  },
+  "executable_pass_condition": {
+    "prepare_command": [
+      "python3",
+      "generate.py"
+    ],
+    "check_command": [
+      "python3",
+      "check.py"
+    ],
+    "generated_paths": [
+      "results/result.json"
+    ],
+    "mutations": [
+      {
+        "name": "corrupt-generated-verdict",
+        "path": "results/result.json",
+        "search": "\"verdict\": \"PASS\"",
+        "replace": "\"verdict\": \"FAIL\""
+      }
+    ]
+  },
+  "observation_surface": {
+    "command": [
+      "python3",
+      "observe.py"
+    ]
+  },
+  "final_artifact_binding": {
+    "prepare_command": [
+      "python3",
+      "bind.py"
+    ],
+    "verify_command": [
+      "python3",
+      "verify_binding.py"
+    ],
+    "artifact_paths": [
+      "results/result.json"
+    ],
+    "receipt_path": "results/binding.json"
+  }
+}
