@@ -45,3 +45,8 @@ Source = "https://github.com/Silentpartnercoding/epistemic-ci"
 
 [tool.setuptools.packages.find]
 include = ["epistemic_ci*"]
+
+[tool.pytest.ini_options]
+# examples/ holds runnable fixtures, not pytest tests. Some are executables
+# that call sys.exit(), which crashes collection if pytest walks them.
+testpaths = ["tests"]
