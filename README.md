@@ -126,6 +126,23 @@ epistemic-ci run \
   --output epistemic-ci-result.json
 ```
 
+## See an ordinary green check fail the test-for-the-tests
+
+[`examples/vacuous-green`](examples/vacuous-green) is an intentionally broken,
+synthetic comparison. Its ordinary verifier returns success while ignoring the
+declared source. Epistemic CI changes that source in an isolated workspace,
+sees the ordinary verifier remain green, and identifies the planted defect as a
+survivor.
+
+```bash
+python3 examples/vacuous-green/ordinary_ci.py
+python3 -m unittest tests.test_vacuous_green_demo -v
+```
+
+The dedicated `vacuous-green-demo` GitHub workflow publishes both observations:
+ordinary CI stays green, and Epistemic CI catches why that green check is not
+evidence of source-sensitive verification.
+
 ## Agent-assisted repository pairing
 
 An agent can perform mechanical discovery without being allowed to invent what
