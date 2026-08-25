@@ -1236,6 +1236,218 @@ def check_effect_reachability(root: Path, config: dict[str, Any]) -> CheckResult
         return CheckResult(name, "fail", str(exc))
 
 
+def _conformance_observation(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ConfigurationError(f"{field} must be one JSON object")
+
+    verdict = value.get("verdict")
+    property_under_test = value.get("property_under_test")
+    property_reached = value.get("property_reached")
+    stop_reason = value.get("stop_reason")
+    if not isinstance(verdict, str) or not verdict:
+        raise ConfigurationError(f"{field}.verdict must be a non-empty string")
+    if not isinstance(property_under_test, str) or not property_under_test:
+        raise ConfigurationError(
+            f"{field}.property_under_test must be a non-empty string"
+        )
+    if not isinstance(property_reached, bool):
+        raise ConfigurationError(f"{field}.property_reached must be a boolean")
+    if not isinstance(stop_reason, str) or not stop_reason:
+        raise ConfigurationError(f"{field}.stop_reason must be a non-empty string")
+    return {
+        "verdict": verdict,
+        "property_under_test": property_under_test,
+        "property_reached": property_reached,
+        "stop_reason": stop_reason,
+    }
+
+
+def _command_observation(result: CommandResult, field: str) -> dict[str, Any]:
+    if result.returncode != 0:
+        reason = result.error or result.stderr.strip() or f"exit code {result.returncode}"
+        raise ConfigurationError(f"{field} failed: {reason}")
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(f"{field} must print one JSON object") from exc
+    return _conformance_observation(value, field)
+
+
+def _reason_bound_matches(
+    expected: dict[str, Any], observed: dict[str, Any]
+) -> bool:
+    return all(observed[key] == expected[key] for key in expected)
+
+
+def check_reason_bound_conformance(root: Path, config: dict[str, Any]) -> CheckResult:
+    """A negative vector must reach and stop at the property it claims to test.
+
+    A verdict-only suite cannot distinguish a correct rejection from an earlier,
+    unrelated guard that returns the same verdict. This check runs every declared
+    vector against a reference implementation and at least one short-circuit
+    mutant. The reference must match all four causal observations. Every mutant
+    must preserve the expected verdict -- proving the ordinary false green --
+    while differing on the reason-bound contract.
+
+    The command output is harness/auditor evidence. Nothing here requires a
+    protocol peer to reveal an internal stop reason on the wire.
+    """
+    name = "reason-bound-conformance"
+    try:
+        if "reason_bound_conformance" not in config:
+            return CheckResult(
+                name,
+                "pass",
+                "no reason-bound vectors declared; this check establishes nothing here",
+                {"declared_cases": 0, "declared_mutants": 0, "vacuous": True},
+            )
+        section = _section(config, "reason_bound_conformance")
+        timeout = _timeout(
+            section.get("timeout_seconds"),
+            "reason_bound_conformance.timeout_seconds",
+        )
+        cases = section.get("cases")
+        if not isinstance(cases, list) or not cases:
+            raise ConfigurationError(
+                "reason_bound_conformance.cases must be a non-empty array"
+            )
+        declared_mutants = sum(
+            len(case["mutants"])
+            for case in cases
+            if isinstance(case, dict) and isinstance(case.get("mutants"), list)
+        )
+
+        observations: list[dict[str, Any]] = []
+        killed: list[str] = []
+        survivors: list[str] = []
+        nonqualifying: list[str] = []
+        reference_mismatches: list[str] = []
+        invalid: list[str] = []
+        case_names: set[str] = set()
+
+        for case_index, case in enumerate(cases):
+            case_field = f"reason_bound_conformance.cases[{case_index}]"
+            try:
+                if not isinstance(case, dict):
+                    raise ConfigurationError(f"{case_field} must be an object")
+                case_name = case.get("name")
+                if not isinstance(case_name, str) or not case_name:
+                    raise ConfigurationError(
+                        f"{case_field}.name must be a non-empty string"
+                    )
+                if case_name in case_names:
+                    raise ConfigurationError(f"{case_field}.name must be unique")
+                case_names.add(case_name)
+                expected = _conformance_observation(
+                    case.get("expected"), f"{case_field}.expected"
+                )
+                if expected["property_reached"] is not True:
+                    raise ConfigurationError(
+                        f"{case_field}.expected.property_reached must be true; "
+                        "a reason-bound vector must require its target property to run"
+                    )
+                reference_command = _command(
+                    case.get("reference_command"), f"{case_field}.reference_command"
+                )
+                mutants = case.get("mutants")
+                if not isinstance(mutants, list) or not mutants:
+                    raise ConfigurationError(
+                        f"{case_field}.mutants must be a non-empty array"
+                    )
+
+                with isolated_workspace(root, config) as workspace:
+                    reference_result = run_command(reference_command, workspace, timeout)
+                reference = _command_observation(
+                    reference_result, f"{case_field}.reference_command"
+                )
+                reference_passes = _reason_bound_matches(expected, reference)
+                if not reference_passes:
+                    reference_mismatches.append(case_name)
+
+                mutant_observations: list[dict[str, Any]] = []
+                mutant_names: set[str] = set()
+                for mutant_index, mutant in enumerate(mutants):
+                    mutant_field = f"{case_field}.mutants[{mutant_index}]"
+                    if not isinstance(mutant, dict):
+                        raise ConfigurationError(f"{mutant_field} must be an object")
+                    mutant_name = mutant.get("name")
+                    if not isinstance(mutant_name, str) or not mutant_name:
+                        raise ConfigurationError(
+                            f"{mutant_field}.name must be a non-empty string"
+                        )
+                    if mutant_name in mutant_names:
+                        raise ConfigurationError(f"{mutant_field}.name must be unique")
+                    mutant_names.add(mutant_name)
+                    command = _command(
+                        mutant.get("command"), f"{mutant_field}.command"
+                    )
+                    with isolated_workspace(root, config) as workspace:
+                        mutant_result = run_command(command, workspace, timeout)
+                    observed = _command_observation(
+                        mutant_result, f"{mutant_field}.command"
+                    )
+                    label = f"{case_name}:{mutant_name}"
+                    verdict_only_passes = observed["verdict"] == expected["verdict"]
+                    reason_bound_passes = _reason_bound_matches(expected, observed)
+                    if not verdict_only_passes:
+                        nonqualifying.append(label)
+                    elif reason_bound_passes:
+                        survivors.append(label)
+                    else:
+                        killed.append(label)
+                    mutant_observations.append(
+                        {
+                            "name": mutant_name,
+                            "observed": observed,
+                            "verdict_only_passes": verdict_only_passes,
+                            "reason_bound_passes": reason_bound_passes,
+                        }
+                    )
+
+                observations.append(
+                    {
+                        "name": case_name,
+                        "expected": expected,
+                        "reference": {
+                            "observed": reference,
+                            "reason_bound_passes": reference_passes,
+                        },
+                        "mutants": mutant_observations,
+                    }
+                )
+            except (ConfigurationError, OSError) as exc:
+                invalid.append(str(exc))
+
+        details = {
+            "cases": observations,
+            "killed": killed,
+            "survivors": survivors,
+            "nonqualifying_mutants": nonqualifying,
+            "reference_mismatches": reference_mismatches,
+            "invalid": invalid,
+            "declared_cases": len(cases),
+            "declared_mutants": declared_mutants,
+            "boundary": "harness/auditor observations; no protocol-wire reason required",
+        }
+        if invalid or reference_mismatches or survivors or nonqualifying:
+            return CheckResult(
+                name,
+                "fail",
+                "each reference must satisfy its reason-bound vector, and every mutant "
+                "must keep the expected verdict while failing the causal contract",
+                details,
+            )
+        return CheckResult(
+            name,
+            "pass",
+            "verdict-only conformance accepted every mutant, while the reason-bound "
+            "vectors rejected them",
+            details,
+        )
+    except (ConfigurationError, OSError) as exc:
+        return CheckResult(name, "fail", str(exc))
+
+
 def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
     if config.get("version") != 1:
         checks = [
@@ -1255,6 +1467,7 @@ def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             check_control_discrimination(root, config),
             check_evidential_independence(root, config),
             check_effect_reachability(root, config),
+            check_reason_bound_conformance(root, config),
         ]
     return {
         "schema": RESULT_SCHEMA,
@@ -1307,18 +1520,36 @@ def _assurance_bound(config: dict[str, Any]) -> dict[str, Any]:
             1 for pin in pins if pin.get("tamper_command") is not None
         ),
     }
+    reason_section = config.get("reason_bound_conformance")
+    reason_cases = (
+        [case for case in reason_section["cases"] if isinstance(case, dict)]
+        if isinstance(reason_section, dict)
+        and isinstance(reason_section.get("cases"), list)
+        else []
+    )
+    reason_bound = {
+        "declared_cases": len(reason_cases),
+        "declared_mutants": sum(
+            len(case["mutants"])
+            for case in reason_cases
+            if isinstance(case.get("mutants"), list)
+        ),
+    }
     return {
         "declared_mutations": counts,
         "declared_mutations_total": total,
         "pinned_inputs": pinned_inputs,
+        "reason_bound_conformance": reason_bound,
         "establishes": (
             f"the configured verification path rejected each of the {total} "
-            f"defect(s) declared in this configuration"
+            f"defect(s) declared in this configuration; "
+            f"{reason_bound['declared_cases']} reason-bound case(s) exercised "
+            f"{reason_bound['declared_mutants']} declared mutant(s)"
         ),
         "does_not_establish": (
             "that the verification path detects any defect that was not declared. "
             "The declared set is chosen by the configuration author and this tool "
-            "cannot determine whether it is representative of the defects that "
-            "matter."
+            "cannot determine whether it is representative of the defects or "
+            "wrong execution paths that matter."
         ),
     }

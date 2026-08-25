@@ -1,0 +1,15 @@
+{
+  "id": "CONFORMANCE-CAUSALITY-001",
+  "input": {
+    "protocol_version": "1.0",
+    "manifest_signature_valid": true,
+    "manifest_declaration_hashes": ["sha256:listed-declaration"],
+    "presented_declaration_hash": "sha256:absent-declaration"
+  },
+  "expected": {
+    "verdict": "reject",
+    "property_under_test": "manifest_membership_binding",
+    "property_reached": true,
+    "stop_reason": "DECLARATION_NOT_IN_MANIFEST"
+  }
+}

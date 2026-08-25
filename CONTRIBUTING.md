@@ -7,7 +7,7 @@ Small, reviewable contributions are welcome.
 3. Keep claims no broader than the executable evidence.
 4. Run `python3 -m unittest discover -s tests -v` and the demo.
 
-V0 is deliberately limited to the four checks documented in the README.
+The implemented checks are deliberately limited to those documented in the README.
 Proposals for additional checks should identify the exact false-positive or
 false-negative behavior, its expected failure condition, and a minimal fixture.
 

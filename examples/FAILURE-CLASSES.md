@@ -1,13 +1,13 @@
 # Three fixtures where ordinary CI is green and the gate refuses
 
 Each fixture is a small, complete, **honest** pipeline. Ordinary verification
-passes. Seven of the eight checks pass. Exactly one refuses.
+passes. Eight of the nine checks pass. Exactly one refuses.
 
 ```
                        ordinary verify   checks passing   refusing
-empty-stratum          PASS              7 / 8            effect-reachability
-pin-drift              PASS              7 / 8            pinned-input-binding
-one-witness            PASS              7 / 8            evidential-independence
+empty-stratum          PASS              8 / 9            effect-reachability
+pin-drift              PASS              8 / 9            pinned-input-binding
+one-witness            PASS              8 / 9            evidential-independence
 ```
 
 The one-failure property is deliberate and is pinned by
