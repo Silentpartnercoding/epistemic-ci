@@ -202,7 +202,7 @@ class EpistemicCITestCase(unittest.TestCase):
     def test_all_checks_pass_without_modifying_source_workspace(self) -> None:
         result = run_all(self.root, self.config())
         self.assertEqual(result["status"], "pass")
-        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 8)
+        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 9)
         self.assertEqual((self.root / "fixture.txt").read_text(), "PASS\n")
         self.assertFalse((self.root / "results").exists())
 

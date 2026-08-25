@@ -46,7 +46,7 @@ as independent evidence.
    - checked population;
    - planted failure cases;
    - candidate-config fingerprint;
-   - all four deterministic check results.
+   - all configured deterministic check results.
    The command also verifies that the candidate configuration uses the
    human-confirmed verification command and binds every trusted output.
 9. Open a pull request. Do not merge or claim independent verification without

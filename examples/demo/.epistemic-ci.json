@@ -32,5 +32,33 @@
     "verify_command": ["python3", "verify_binding.py"],
     "artifact_paths": ["results/result.json"],
     "receipt_path": "results/binding.json"
+  },
+  "reason_bound_conformance": {
+    "cases": [
+      {
+        "name": "CONFORMANCE-CAUSALITY-001",
+        "expected": {
+          "verdict": "reject",
+          "property_under_test": "manifest_membership_binding",
+          "property_reached": true,
+          "stop_reason": "DECLARATION_NOT_IN_MANIFEST"
+        },
+        "reference_command": [
+          "python3",
+          "conformance_observe.py",
+          "reference"
+        ],
+        "mutants": [
+          {
+            "name": "unsupported-version-short-circuit",
+            "command": [
+              "python3",
+              "conformance_observe.py",
+              "short-circuit-mutant"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

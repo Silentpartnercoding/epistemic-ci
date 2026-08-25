@@ -6,7 +6,7 @@ evidence.
 
 In plain language: it is a test for the tests.
 
-## The eight v0 checks
+## The nine checks
 
 1. **Vacuous Test** plants every declared source or input defect in a fresh
    workspace. Every defect must make verification fail.
@@ -40,6 +40,12 @@ reads as health.**
 8. **Effect Reachability** requires every stratum the endpoint depends on to
    contain instances. A population with 208 searched and 0 not-searched is
    positive, fingerprinted, and structurally unable to move the endpoint.
+
+9. **Reason-Bound Conformance** requires a reference implementation to match
+   the vector's verdict, target property, reachability witness, and stop reason.
+   Every declared mutant must keep the expected verdict while failing that
+   causal contract. A negative vector cannot stay green merely because an
+   unrelated earlier guard returned the same rejection.
 
 Check 8 is the only one that interrogates the **population** rather than the
 verification path, and it is the only failure no amount of checking the checker
@@ -86,8 +92,14 @@ One known limitation: `.git` is excluded from the isolated workspace, so a pin
 resolved by `git show` inside the workspace cannot be exercised by this check.
 Pins that resolve outside the workspace, or via a `tamper_command`, can.
 
-All four checks fail closed. A surviving, invalid, missing, escaped, or timed-out
-test makes the complete run fail.
+Check 9 deliberately separates two surfaces. Its commands report observations
+to the harness or auditor; it does not require a protocol peer to reveal an
+internal stop reason on the wire. A pass is bounded by the mutants the
+configuration declares. It proves those false-green implementations were killed,
+not that every possible wrong execution path has been enumerated.
+
+Every configured check fails closed. A surviving, invalid, missing, escaped, or
+timed-out test makes the complete run fail.
 
 **What a passing run is bounded by.** Checks 1 and 2 plant the defects the
 configuration *declares*. A pass establishes that the verification path rejects
@@ -173,7 +185,7 @@ epistemic-ci init \
 ```
 
 Only a report with `status: ready_for_human_review` has complete human answers
-and a candidate configuration that passes all four deterministic checks. This
+and a candidate configuration that passes all configured deterministic checks. This
 status is not self-approval: the agent opens a reviewable pull request, and the
 owner or separately controlled reviewer decides whether the declarations match
 the intended claim.
@@ -257,6 +269,42 @@ match exactly once. The executable-pass mutations must target files selected by
 Each section accepts an optional `timeout_seconds` from 1 to 3600. The default is
 120 seconds. `workspace_exclude` may add copy-exclusion patterns when a repository
 contains large local artifacts.
+
+## Reason-bound conformance contract
+
+Each reference and mutant command must exit zero and print one JSON object
+containing the four fields in `expected`. The reference must match all four.
+Each mutant must match the expected `verdict` but differ on at least one causal
+field; otherwise the case has not reproduced the verdict-only false green or
+has failed to kill the mutant.
+
+```json
+{
+  "reason_bound_conformance": {
+    "cases": [
+      {
+        "name": "CONFORMANCE-CAUSALITY-001",
+        "expected": {
+          "verdict": "reject",
+          "property_under_test": "manifest_membership_binding",
+          "property_reached": true,
+          "stop_reason": "DECLARATION_NOT_IN_MANIFEST"
+        },
+        "reference_command": ["python3", "observe.py", "reference"],
+        "mutants": [
+          {
+            "name": "unsupported-version-short-circuit",
+            "command": ["python3", "observe.py", "mutant"]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`property_reached` must be `true` in the expected contract. Stop reasons should
+be stable machine identifiers; human-readable error messages are not compared.
 
 ## Observation contract
 
