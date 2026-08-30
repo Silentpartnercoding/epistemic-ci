@@ -33,53 +33,23 @@
     "artifact_paths": ["results/result.json"],
     "receipt_path": "results/binding.json"
   },
-  "reason_bound_conformance": {
-    "cases": [
-      {
-        "name": "CONFORMANCE-CAUSALITY-001",
-        "expected": {
-          "verdict": "reject",
-          "property_under_test": "manifest_membership_binding",
-          "property_reached": true,
-          "stop_reason": "DECLARATION_NOT_IN_MANIFEST"
-        },
-        "reference_command": [
-          "python3",
-          "conformance_observe.py",
-          "reference"
-        ],
-        "mutants": [
-          {
-            "name": "unsupported-version-short-circuit",
-            "command": [
-              "python3",
-              "conformance_observe.py",
-              "short-circuit-mutant"
-            ]
-          }
-        ]
-      }
-    ]
-  },
   "report_discrimination": {
-    "discriminator_fields": ["ok", "this_run"],
-    "failure_field": "ok",
-    "failure_value": false,
+    "discriminator_fields": ["ok", "cases", "observations"],
     "states": [
       {
         "name": "completed-work",
         "outcome": "did_work",
-        "command": ["python3", "report_outcome.py", "did-work"]
+        "command": ["python3", "report.py", "did-work"]
       },
       {
         "name": "empty-pass",
         "outcome": "did_nothing",
-        "command": ["python3", "report_outcome.py", "did-nothing"]
+        "command": ["python3", "report.py", "did-nothing"]
       },
       {
         "name": "case-failure",
         "outcome": "failed",
-        "command": ["python3", "report_outcome.py", "failed"]
+        "command": ["python3", "report.py", "failed"]
       }
     ]
   }

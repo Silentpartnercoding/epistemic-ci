@@ -96,6 +96,17 @@ class EpistemicCITestCase(unittest.TestCase):
             "Path('results/pinned-out.txt').write_text(Path('.pin/pinned.txt').read_text())\n",
             encoding="utf-8",
         )
+        (self.root / "report.py").write_text(
+            "import json,sys\n"
+            "state=sys.argv[1]\n"
+            "summaries={\n"
+            " 'did-work':{'ok':True,'this_run':{'completed':2,'failed':0}},\n"
+            " 'did-nothing':{'ok':True,'this_run':{'completed':0,'failed':0}},\n"
+            " 'failed':{'ok':False,'this_run':{'completed':0,'failed':1}},\n"
+            "}\n"
+            "print(json.dumps(summaries[state],sort_keys=True))\n",
+            encoding="utf-8",
+        )
 
     @staticmethod
     def valid_observation_source(count: int = 1) -> str:
@@ -197,12 +208,34 @@ class EpistemicCITestCase(unittest.TestCase):
                     }
                 ],
             },
+            "report_discrimination": {
+                "discriminator_fields": ["ok", "this_run"],
+                "failure_field": "ok",
+                "failure_value": False,
+                "states": [
+                    {
+                        "name": "completed-work",
+                        "outcome": "did_work",
+                        "command": [PYTHON, "report.py", "did-work"],
+                    },
+                    {
+                        "name": "empty-pass",
+                        "outcome": "did_nothing",
+                        "command": [PYTHON, "report.py", "did-nothing"],
+                    },
+                    {
+                        "name": "case-failure",
+                        "outcome": "failed",
+                        "command": [PYTHON, "report.py", "failed"],
+                    },
+                ],
+            },
         }
 
     def test_all_checks_pass_without_modifying_source_workspace(self) -> None:
         result = run_all(self.root, self.config())
         self.assertEqual(result["status"], "pass")
-        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 9)
+        self.assertEqual([item["status"] for item in result["checks"]], ["pass"] * 10)
         self.assertEqual((self.root / "fixture.txt").read_text(), "PASS\n")
         self.assertFalse((self.root / "results").exists())
 

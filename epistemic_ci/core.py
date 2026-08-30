@@ -1448,6 +1448,238 @@ def check_reason_bound_conformance(root: Path, config: dict[str, Any]) -> CheckR
         return CheckResult(name, "fail", str(exc))
 
 
+def _report_summary(stdout: str, field: str) -> dict[str, Any]:
+    try:
+        value = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(f"{field} must print one JSON object") from exc
+    if not isinstance(value, dict):
+        raise ConfigurationError(f"{field} must print one JSON object")
+    return value
+
+
+def check_report_discrimination(root: Path, config: dict[str, Any]) -> CheckResult:
+    """A harness summary must vary across the outcomes it claims to report.
+
+    Observation Surface proves that a structured report exists and binds a
+    population and result. It cannot detect a report that is byte-for-byte the
+    same after doing work, doing nothing, or failing. This check runs the
+    commands declared for those three outcome classes in separate workspaces,
+    requires pairwise-distinct projections over declared JSON fields, and
+    requires failure to differ from success through a non-zero exit code or a
+    declared top-level field.
+
+    The guarantee is deliberately bounded by the states and commands declared
+    by the configuration author. It does not infer whether those commands
+    truthfully reproduce every real harness path.
+    """
+    name = "report-discrimination"
+    try:
+        if "report_discrimination" not in config:
+            return CheckResult(
+                name,
+                "pass",
+                "no report outcome states declared; this check establishes nothing here",
+                {"declared_states": 0, "vacuous": True},
+            )
+        section = _section(config, "report_discrimination")
+        timeout = _timeout(
+            section.get("timeout_seconds"),
+            "report_discrimination.timeout_seconds",
+        )
+        discriminator_fields = section.get("discriminator_fields")
+        if (
+            not isinstance(discriminator_fields, list)
+            or not discriminator_fields
+            or any(not isinstance(field, str) or not field for field in discriminator_fields)
+        ):
+            raise ConfigurationError(
+                "report_discrimination.discriminator_fields must be a non-empty "
+                "array of top-level field names"
+            )
+        if len(set(discriminator_fields)) != len(discriminator_fields):
+            raise ConfigurationError(
+                "report_discrimination.discriminator_fields must not contain duplicates"
+            )
+        states = section.get("states")
+        if not isinstance(states, list) or len(states) < 3:
+            raise ConfigurationError(
+                "report_discrimination.states must declare at least did_work, "
+                "did_nothing, and failed"
+            )
+
+        definitions: list[tuple[str, str, list[str]]] = []
+        names: set[str] = set()
+        outcomes: dict[str, int] = {
+            "did_work": 0,
+            "did_nothing": 0,
+            "failed": 0,
+        }
+        for index, state in enumerate(states):
+            state_field = f"report_discrimination.states[{index}]"
+            if not isinstance(state, dict):
+                raise ConfigurationError(f"{state_field} must be an object")
+            state_name = state.get("name")
+            if not isinstance(state_name, str) or not state_name:
+                raise ConfigurationError(f"{state_field}.name must be a non-empty string")
+            if state_name in names:
+                raise ConfigurationError(f"{state_field}.name must be unique")
+            names.add(state_name)
+            outcome = state.get("outcome")
+            if outcome not in outcomes:
+                raise ConfigurationError(
+                    f"{state_field}.outcome must be did_work, did_nothing, or failed"
+                )
+            outcomes[outcome] += 1
+            definitions.append(
+                (state_name, outcome, _command(state.get("command"), f"{state_field}.command"))
+            )
+        missing = [outcome for outcome, count in outcomes.items() if count == 0]
+        if missing:
+            raise ConfigurationError(
+                "report_discrimination.states must include: " + ", ".join(missing)
+            )
+
+        failure_field = section.get("failure_field")
+        has_failure_field = failure_field is not None
+        if has_failure_field:
+            if not isinstance(failure_field, str) or not failure_field:
+                raise ConfigurationError(
+                    "report_discrimination.failure_field must be a non-empty top-level field name"
+                )
+            if "failure_value" not in section:
+                raise ConfigurationError(
+                    "report_discrimination.failure_value is required with failure_field"
+                )
+            if failure_field not in discriminator_fields:
+                raise ConfigurationError(
+                    "report_discrimination.failure_field must also appear in "
+                    "discriminator_fields"
+                )
+        failure_value = section.get("failure_value")
+
+        observed: list[dict[str, Any]] = []
+        invalid: list[str] = []
+        for state_name, outcome, command in definitions:
+            with isolated_workspace(root, config) as workspace:
+                result = run_command(command, workspace, timeout)
+            state_field = f"report_discrimination state {state_name!r}"
+            if result.timed_out or result.error:
+                invalid.append(
+                    f"{state_field} failed: "
+                    f"{result.error or f'command exceeded {timeout} seconds'}"
+                )
+                continue
+            try:
+                summary = _report_summary(result.stdout, state_field)
+            except ConfigurationError as exc:
+                invalid.append(str(exc))
+                continue
+            missing_fields = [
+                field for field in discriminator_fields if field not in summary
+            ]
+            if missing_fields:
+                invalid.append(
+                    f"{state_field} is missing declared discriminator field(s): "
+                    + ", ".join(missing_fields)
+                )
+                continue
+            discriminator = {
+                field: summary[field] for field in discriminator_fields
+            }
+            if outcome != "failed" and result.returncode != 0:
+                invalid.append(
+                    f"{state_field} represents {outcome} and must exit zero; "
+                    f"got {result.returncode}"
+                )
+            observed.append(
+                {
+                    "name": state_name,
+                    "outcome": outcome,
+                    "returncode": result.returncode,
+                    "summary": summary,
+                    "summary_fingerprint": _canonical_sha256(summary),
+                    "discriminator": discriminator,
+                    "discriminator_fingerprint": _canonical_sha256(discriminator),
+                    **({"stderr": result.stderr} if result.stderr else {}),
+                }
+            )
+
+        fingerprints: dict[str, list[str]] = {}
+        for state in observed:
+            fingerprints.setdefault(state["discriminator_fingerprint"], []).append(
+                state["name"]
+            )
+        collisions = [
+            state_names for state_names in fingerprints.values() if len(state_names) > 1
+        ]
+
+        if has_failure_field:
+            for state in observed:
+                summary = state["summary"]
+                if failure_field not in summary:
+                    invalid.append(
+                        f"report_discrimination state {state['name']!r} must contain "
+                        f"the declared failure field {failure_field!r}"
+                    )
+                    continue
+                value = summary[failure_field]
+                if state["outcome"] == "failed" and value != failure_value:
+                    invalid.append(
+                        f"report_discrimination state {state['name']!r} must report "
+                        f"{failure_field}={failure_value!r}"
+                    )
+                if state["outcome"] != "failed" and value == failure_value:
+                    invalid.append(
+                        f"report_discrimination state {state['name']!r} reports the "
+                        "declared failure value despite being non-failure"
+                    )
+            failure_signal: dict[str, Any] = {
+                "mode": "field",
+                "field": failure_field,
+                "failure_value": failure_value,
+            }
+        else:
+            zero_exit_failures = [
+                state["name"]
+                for state in observed
+                if state["outcome"] == "failed" and state["returncode"] == 0
+            ]
+            if zero_exit_failures:
+                invalid.append(
+                    "failed report state(s) exited zero without a declared failure_field: "
+                    + ", ".join(zero_exit_failures)
+                )
+            failure_signal = {"mode": "exit-code"}
+
+        details = {
+            "states": observed,
+            "collisions": collisions,
+            "invalid": invalid,
+            "declared_states": len(states),
+            "declared_outcomes": outcomes,
+            "discriminator_fields": discriminator_fields,
+            "failure_signal": failure_signal,
+        }
+        if collisions or invalid or len(observed) != len(states):
+            return CheckResult(
+                name,
+                "fail",
+                "every declared outcome state must produce a distinct JSON summary, "
+                "and failure must be distinguishable by exit code or an explicit field",
+                details,
+            )
+        return CheckResult(
+            name,
+            "pass",
+            "did-work, did-nothing, and failed outcomes produced distinct summaries "
+            "with an explicit failure signal",
+            details,
+        )
+    except (ConfigurationError, OSError) as exc:
+        return CheckResult(name, "fail", str(exc))
+
+
 def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
     if config.get("version") != 1:
         checks = [
@@ -1468,6 +1700,7 @@ def run_all(root: Path, config: dict[str, Any]) -> dict[str, Any]:
             check_evidential_independence(root, config),
             check_effect_reachability(root, config),
             check_reason_bound_conformance(root, config),
+            check_report_discrimination(root, config),
         ]
     return {
         "schema": RESULT_SCHEMA,
@@ -1535,21 +1768,49 @@ def _assurance_bound(config: dict[str, Any]) -> dict[str, Any]:
             if isinstance(case.get("mutants"), list)
         ),
     }
+    report_section = config.get("report_discrimination")
+    report_states = (
+        [state for state in report_section["states"] if isinstance(state, dict)]
+        if isinstance(report_section, dict)
+        and isinstance(report_section.get("states"), list)
+        else []
+    )
+    report_discrimination = {
+        "declared_states": len(report_states),
+        "declared_outcomes": sorted(
+            {
+                state["outcome"]
+                for state in report_states
+                if isinstance(state.get("outcome"), str)
+            }
+        ),
+        "declared_fields": (
+            list(report_section["discriminator_fields"])
+            if isinstance(report_section, dict)
+            and isinstance(report_section.get("discriminator_fields"), list)
+            else []
+        ),
+    }
     return {
         "declared_mutations": counts,
         "declared_mutations_total": total,
         "pinned_inputs": pinned_inputs,
         "reason_bound_conformance": reason_bound,
+        "report_discrimination": report_discrimination,
         "establishes": (
             f"the configured verification path rejected each of the {total} "
             f"defect(s) declared in this configuration; "
             f"{reason_bound['declared_cases']} reason-bound case(s) exercised "
-            f"{reason_bound['declared_mutants']} declared mutant(s)"
+            f"{reason_bound['declared_mutants']} declared mutant(s); "
+            f"{report_discrimination['declared_states']} declared report outcome "
+            "state(s) were compared"
         ),
         "does_not_establish": (
             "that the verification path detects any defect that was not declared. "
             "The declared set is chosen by the configuration author and this tool "
             "cannot determine whether it is representative of the defects or "
-            "wrong execution paths that matter."
+            "wrong execution paths that matter. Report discrimination is bounded "
+            "by its declared states and does not prove that the state commands "
+            "truthfully reproduce every real harness path."
         ),
     }

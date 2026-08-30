@@ -1,23 +1,24 @@
-# Three fixtures where ordinary CI is green and the gate refuses
+# Four fixtures where ordinary CI is green and the gate refuses
 
 Each fixture is a small, complete, **honest** pipeline. Ordinary verification
-passes. Eight of the nine checks pass. Exactly one refuses.
+passes. Nine of the ten checks pass. Exactly one refuses.
 
 ```
                        ordinary verify   checks passing   refusing
-empty-stratum          PASS              8 / 9            effect-reachability
-pin-drift              PASS              8 / 9            pinned-input-binding
-one-witness            PASS              8 / 9            evidential-independence
+empty-stratum          PASS              9 / 10           effect-reachability
+pin-drift              PASS              9 / 10           pinned-input-binding
+one-witness            PASS              9 / 10           evidential-independence
+report-invariant       PASS              9 / 10           report-discrimination
 ```
 
 The one-failure property is deliberate and is pinned by
 `tests/test_failure_class_fixtures.py`. A fixture failing four checks would
 demonstrate an incomplete configuration, not the defect it is about.
 
-## Why these three are not caught by planting defects
+## Why these four are not caught by planting defects
 
 The standard defence is sensitivity: plant a defect, confirm verification goes
-red. **All three fixtures pass that defence.** `vacuous-test` is green in every
+red. **All four fixtures pass that defence.** `vacuous-test` is green in every
 one of them — the declared defect does make verification fail. The verifier is
 working. It simply is not connected to what a reader assumes a green check
 established.
@@ -51,9 +52,20 @@ refused when coverage is incomplete."* The mechanism's only lever is incomplete
 coverage, and the corpus contains none: `searched 8 · not_searched 0`.
 
 Verification is sound and the number is honest. It was decided before any data
-existed. This is the only one of the three that interrogates the **population**
+existed. This is the only one of the four that interrogates the **population**
 rather than the verification path, and no amount of checking the checker finds
 it.
+
+### `report-invariant` — success that means work, no work, or failure
+
+The harness prints the same JSON summary for `did_work`, `did_nothing`, and
+`failed`, and exits zero in every state. Observation Surface accepts the report:
+it exists, is structured, and can bind real artifacts. The report simply is not
+a function of the outcome it claims to summarize.
+
+Report Discrimination runs the three declared state commands independently. It
+requires pairwise-distinct summaries and requires failure to differ through a
+non-zero exit code or a declared field. This fixture supplies neither.
 
 ## Running them
 
@@ -61,6 +73,7 @@ it.
 epistemic-ci run --root examples/empty-stratum --config .epistemic-ci.json
 epistemic-ci run --root examples/pin-drift     --config .epistemic-ci.json
 epistemic-ci run --root examples/one-witness   --config .epistemic-ci.json
+epistemic-ci run --root examples/report-invariant --config .epistemic-ci.json
 ```
 
 Each exits non-zero and names one check.

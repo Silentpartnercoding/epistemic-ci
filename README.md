@@ -6,7 +6,7 @@ evidence.
 
 In plain language: it is a test for the tests.
 
-## The nine checks
+## The ten checks
 
 1. **Vacuous Test** plants every declared source or input defect in a fresh
    workspace. Every defect must make verification fail.
@@ -46,6 +46,12 @@ reads as health.**
    Every declared mutant must keep the expected verdict while failing that
    causal contract. A negative vector cannot stay green merely because an
    unrelated earlier guard returned the same rejection.
+
+10. **Report Discrimination** requires the harness's own JSON summary to differ
+    across declared `did_work`, `did_nothing`, and `failed` states. Failure must
+    also differ through a non-zero exit code or a declared field. A scheduled
+    run cannot remain green merely because its summary is invariant to whether
+    any work happened.
 
 Check 8 is the only one that interrogates the **population** rather than the
 verification path, and it is the only failure no amount of checking the checker
@@ -97,6 +103,12 @@ to the harness or auditor; it does not require a protocol peer to reveal an
 internal stop reason on the wire. A pass is bounded by the mutants the
 configuration declares. It proves those false-green implementations were killed,
 not that every possible wrong execution path has been enumerated.
+
+Check 10 is not another population counter. It compares declared projections of
+normalized JSON summaries from independently executed outcome-state commands.
+A pass is bounded by those commands and fields: it proves that the supplied
+state reproductions are distinguishable, not that they truthfully cover every
+real harness path.
 
 Every configured check fails closed. A surviving, invalid, missing, escaped, or
 timed-out test makes the complete run fail.
@@ -305,6 +317,51 @@ has failed to kill the mutant.
 
 `property_reached` must be `true` in the expected contract. Stop reasons should
 be stable machine identifiers; human-readable error messages are not compared.
+
+## Report-discrimination contract
+
+Declare at least one command for each outcome class: `did_work`, `did_nothing`,
+and `failed`. Every command runs in its own isolated workspace and must print
+one JSON object. Declare the top-level `discriminator_fields` that are supposed
+to vary with those outcomes. Their projected values must be pairwise distinct;
+incidental fields such as timestamps cannot manufacture a pass. Non-failure
+states must exit zero.
+
+A failed state may signal failure with a non-zero exit code. If the harness
+reports failures while exiting zero, declare a top-level `failure_field` and its
+`failure_value`; every state must then carry that field, failed states must use
+the failure value, and non-failure states must not.
+
+```json
+{
+  "report_discrimination": {
+    "discriminator_fields": ["ok", "this_run"],
+    "failure_field": "ok",
+    "failure_value": false,
+    "states": [
+      {
+        "name": "completed-work",
+        "outcome": "did_work",
+        "command": ["python3", "report.py", "did-work"]
+      },
+      {
+        "name": "empty-pass",
+        "outcome": "did_nothing",
+        "command": ["python3", "report.py", "did-nothing"]
+      },
+      {
+        "name": "case-failure",
+        "outcome": "failed",
+        "command": ["python3", "report.py", "failed"]
+      }
+    ]
+  }
+}
+```
+
+Field-mode deliberately supports only a top-level JSON field in this first
+contract. Nested or domain-specific status conventions need an adapter command
+that emits the small neutral summary being tested.
 
 ## Observation contract
 
