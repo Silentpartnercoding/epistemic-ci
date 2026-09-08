@@ -130,6 +130,44 @@ command is honest. It establishes narrower facts about the configured
 verification path. Those facts are useful, but they are not permission,
 authority, peer review, or scientific correctness.
 
+### How each check was admitted
+
+A gate that validates other people's verification should say how its own checks
+got in. All eleven entries below were proposed and accepted by the same party,
+and none has been reviewed by anyone outside the project.
+
+| check | admitted |
+|---|---|
+| Vacuous Test | author-proposed, author-accepted |
+| Executable Pass Condition | author-proposed, author-accepted |
+| Observation Surface | author-proposed, author-accepted |
+| Final Artifact Binding | author-proposed, author-accepted |
+| Pinned Input Binding | author-proposed, author-accepted |
+| Control Discrimination | author-proposed, author-accepted |
+| Evidential Independence | author-proposed, author-accepted |
+| Effect Reachability | author-proposed, author-accepted |
+| Reason-Bound Conformance | author-proposed, author-accepted |
+| Report Discrimination | author-proposed, author-accepted |
+| Assertion Erosion (proposed, [#21](https://github.com/Silentpartnercoding/epistemic-ci/issues/21)) | author-proposed, not yet accepted |
+
+This is the ordinary starting position for a young project, and it is stated
+here rather than left to be inferred from commit authorship, because the
+alternative is a tool that asks other projects for evidence it does not supply
+about itself.
+
+It also matters more here than it would elsewhere. Agreement among parties in
+one control domain is internal replication, not independent validation — a
+distinction this project exists to enforce. A test-for-the-tests whose every
+check was self-proposed and self-accepted has the same shape as the defects it
+detects.
+
+The column is not decoration. It exists so that the first externally reviewed
+check is **visibly different** from the ten that were not, and so that the
+absence of external review is a published fact rather than a discoverable one.
+Reviews, objections and counterexamples from outside the project are the
+contribution this repository most needs; a new check is worth less than the
+first outsider willing to say one of these is wrong.
+
 ## Install and run
 
 Requires Python 3.10 or newer.
